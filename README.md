@@ -15,7 +15,8 @@ A powerful Python-based tool for tracking and analyzing YouTube channel statisti
 - 🌐 Supports global channels across different categories (Music, Gaming, Education, etc.)
 
 ## Working in progress
-- 🔍 Scrapes top 2 million YouTube channels
+- 🔍 Scrapes top 321,000 YouTube channels by subscribers
+- 🔍 Scrapes top 2 millions YouTube channels by subscribers
 - 📈 Tracks subscriber counts and channel growth over time
 - 🔌 Integrates with YouTube Data API for accurate statistics
 
