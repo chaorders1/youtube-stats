@@ -77,8 +77,8 @@ driver = webdriver.Chrome(options=chrome_options)
 
 try:
     all_data = []
-    # Scrape from 0 to 9500 with steps of 500
-    for offset in range(0, 1000, 500):  # test with 1000 first
+    # Scrape from 0 to 10000 with steps of 500
+    for offset in range(0, 10000, 500):
         print(f"\nScraping page with offset {offset}...")
         url = f'https://stats.videoamigo.com/top-youtube-channels-new/o-overall/subs/{offset}/desc'
         driver.get(url)
