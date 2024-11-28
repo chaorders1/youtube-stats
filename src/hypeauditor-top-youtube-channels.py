@@ -65,7 +65,7 @@ driver = webdriver.Chrome(options=chrome_options)
 
 try:
     all_data = []
-    total_pages = 2
+    total_pages = 20
     
     for page in range(1, total_pages + 1):
         print(f"\nScraping page {page} of {total_pages}...")
