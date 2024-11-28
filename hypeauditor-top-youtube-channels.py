@@ -16,25 +16,15 @@ def convert_number(number_str):
     except:
         return 0
 
-print("Setting up Chrome options...")
-chrome_options = Options()
-chrome_options.add_argument('--headless')  # Run in headless mode
-chrome_options.add_argument('--no-sandbox')
-chrome_options.add_argument('--disable-dev-shm-usage')
+def get_youtube_url(channel_name):
+    # Remove any spaces and special characters, convert to lowercase
+    channel_handle = channel_name.lower().strip()
+    return f"https://www.youtube.com/@{channel_handle}"
 
-print("Starting Chrome WebDriver...")
-driver = webdriver.Chrome(options=chrome_options)
-
-try:
-    print("Navigating to the webpage...")
-    url = 'https://hypeauditor.com/top-youtube/'
-    driver.get(url)
-    
+def scrape_page(driver):
     # Wait for the table to load
-    print("Waiting for content to load...")
     time.sleep(5)  # Give the page some time to load
     
-    print("Finding table elements...")
     # Get all the data using Selenium's find_elements with updated selectors
     names = driver.find_elements(By.CSS_SELECTOR, '.contributor__name')
     name_contents = driver.find_elements(By.CSS_SELECTOR, '.contributor__name-content')
@@ -45,37 +35,55 @@ try:
     likes = driver.find_elements(By.CSS_SELECTOR, '.row-cell.avg-likes')
     comments = driver.find_elements(By.CSS_SELECTOR, '.row-cell.avg-comments')
     
-    print("\nData found:")
-    print(f"Names: {len(names)}")
-    print(f"Name contents: {len(name_contents)}")
-    print(f"Titles: {len(titles)}")
-    print(f"Subscribers: {len(subscribers)}")
-    print(f"Countries: {len(countries)}")
-    print(f"Views: {len(views)}")
-    print(f"Likes: {len(likes)}")
-    print(f"Comments: {len(comments)}")
-    
     # Process the data
-    data = []
+    page_data = []
     for i in range(min(len(names), len(name_contents), len(titles), len(subscribers), len(countries), len(views), len(likes), len(comments))):
+        channel_name = names[i].text.strip()
         row = {
-            'Channel Name': names[i].text.strip(),
-            'Display Name': name_contents[i].text.strip(),
+            'Channel_Name': channel_name,
+            'Display_Name': name_contents[i].text.strip(),
             'Title': titles[i].text.strip(),
             'Subscribers': convert_number(subscribers[i].text.strip()),
             'Country': countries[i].text.strip() or 'Unknown',
-            'Avg Views': convert_number(views[i].text.strip()),
-            'Avg Likes': convert_number(likes[i].text.strip()),
-            'Avg Comments': convert_number(comments[i].text.strip())
+            'Avg_Views': convert_number(views[i].text.strip()),
+            'Avg_Likes': convert_number(likes[i].text.strip()),
+            'Avg_Comments': convert_number(comments[i].text.strip()),
+            'YouTube_Channel_URL': get_youtube_url(channel_name)
         }
-        data.append(row)
+        page_data.append(row)
     
-    # Create DataFrame
-    df = pd.DataFrame(data)
+    return page_data
+
+print("Setting up Chrome options...")
+chrome_options = Options()
+chrome_options.add_argument('--headless')  # Run in headless mode
+chrome_options.add_argument('--no-sandbox')
+chrome_options.add_argument('--disable-dev-shm-usage')
+
+print("Starting Chrome WebDriver...")
+driver = webdriver.Chrome(options=chrome_options)
+
+try:
+    all_data = []
+    total_pages = 2
+    
+    for page in range(1, total_pages + 1):
+        print(f"\nScraping page {page} of {total_pages}...")
+        url = f'https://hypeauditor.com/top-youtube/?p={page}'
+        driver.get(url)
+        
+        page_data = scrape_page(driver)
+        all_data.extend(page_data)
+        
+        print(f"Successfully scraped {len(page_data)} channels from page {page}")
+    
+    # Create DataFrame with all data
+    df = pd.DataFrame(all_data)
     
     # Export to CSV
     df.to_csv('hyperauditor-top-youtube-channels.csv', index=False, encoding='utf-8')
-    print("\nData has been saved to hyperauditor-top-youtube-channels.csv")
+    print(f"\nTotal channels scraped: {len(all_data)}")
+    print("Data has been saved to hyperauditor-top-youtube-channels.csv")
     
     # Display first few rows
     print("\nFirst few rows of the data:")
