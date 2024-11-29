@@ -11,7 +11,7 @@ Usage:
 
     Bulk validation from database:
         python youtube-url-validator.py --db-path /path/to/database.db --table-name youtube_channels --url-column youtube_channel_url --batch-size 800
-        python youtube-url-validator.py --db-path /Users/yuanlu/Code/test/youtube-top-10000-channels/data/hyperauditor-top-youtube-channels.db --table-name "hyperauditor-top-youtube-channels" --url-column youtube_channel_url --batch-size 800
+        python src/utils/youtube-url-validator.py --db-path /Users/yuanlu/Code/test/youtube-top-10000-channels/data/hyperauditor-top-youtube-channels.db --table-name "hyperauditor-top-youtube-channels" --url-column "YouTube_Channel_URL" --batch-size 800
 
 Options:
     --url TEXT          Single YouTube channel URL to validate
@@ -235,10 +235,10 @@ class YouTubeURLValidator:
                 if not re.match(r'^[A-Za-z0-9_-]{24}$', channel_id):
                     return False, "Invalid channel ID format"
             elif path.startswith('/@'):
-                # 验证handle格式 - 允许更多字符
+                # 验证handle格式 - 更宽松的规则
                 handle = path.split('/@')[1]
-                # Allow dots, special characters, and Unicode characters in handles
-                if not re.match(r'^[\w\-.]+(?:\.[a-zA-Z]{2,})?$', handle):
+                # Allow almost any character except spaces and special URL characters
+                if not re.match(r'^[^\s/?#<>\\]+$', handle):
                     return False, "Invalid handle format"
                 if len(handle) > 30:  # YouTube handles have a maximum length
                     return False, "Handle too long"
