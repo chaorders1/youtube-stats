@@ -1,3 +1,26 @@
+"""
+YouTube URL Validator
+
+A tool to validate YouTube channel URLs either individually or in bulk from a database.
+
+Usage:
+    Single URL validation:
+        python youtube-url-validator.py --url "https://www.youtube.com/channel/UCzxsWdAqfZfak63rTC6m1XQ"
+        python youtube-url-validator.py --url "https://www.youtube.com/@gh.s"
+        python youtube-url-validator.py --url "https://www.youtube.com/@channelname"
+
+    Bulk validation from database:
+        python youtube-url-validator.py --db-path /path/to/database.db --table-name youtube_channels --url-column youtube_channel_url --batch-size 800
+        python youtube-url-validator.py --db-path /Users/yuanlu/Code/test/youtube-top-10000-channels/data/hyperauditor-top-youtube-channels.db --table-name "hyperauditor-top-youtube-channels" --url-column youtube_channel_url --batch-size 800
+
+Options:
+    --url TEXT          Single YouTube channel URL to validate
+    --db-path TEXT      Path to SQLite database
+    --table-name TEXT   Name of table containing URLs
+    --url-column TEXT   Name of column containing URLs [default: youtube_channel_url]
+    --batch-size INT    Number of URLs to process per batch [default: 800]
+"""
+
 import requests
 import concurrent.futures
 import re
@@ -5,13 +28,199 @@ from typing import Dict, List, Tuple
 import pandas as pd
 from urllib.parse import urlparse
 import sqlite3
+import time
+import random
+from datetime import datetime
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
+from tqdm import tqdm
+import argparse
 
 class YouTubeURLValidator:
     def __init__(self):
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        # 减少重试次数和等待时间
+        retry_strategy = Retry(
+            total=1,  # 从2减到1次重试
+            backoff_factor=0.1,  # 从0.5减到0.1
+            status_forcelist=[429, 500, 502, 503, 504],
+            # 添加快速失败的状态码
+            raise_on_status=False,
+            respect_retry_after_header=False  # 忽略服务器的 retry-after 头
+        )
         
+        # 减少并发session数量以降低内存占用
+        self.sessions = [self._create_session(retry_strategy) for _ in range(10)]  # 从20减到10
+        self.current_session = 0
+        self.request_times = []
+        # 增加每分钟请求限制
+        self.max_requests_per_minute = 500  # 从300增加到500
+        
+    def _create_session(self, retry_strategy):
+        session = requests.Session()
+        session.mount("https://", HTTPAdapter(max_retries=retry_strategy, pool_maxsize=100))
+        session.headers.update({
+            'User-Agent': f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.randint(90, 100)}.0.{random.randint(4000, 5000)}.0 Safari/537.36'
+        })
+        return session
+        
+    def _get_session(self):
+        """Get next session in round-robin fashion"""
+        session = self.sessions[self.current_session]
+        self.current_session = (self.current_session + 1) % len(self.sessions)
+        return session
+        
+    def _rate_limit(self):
+        """优化的速率限制"""
+        current_time = time.time()
+        minute_ago = current_time - 60
+        
+        # 只保留最近1分钟的请求记录
+        self.request_times = [t for t in self.request_times if t > minute_ago]
+        
+        if len(self.request_times) >= self.max_requests_per_minute:
+            sleep_time = max(0, self.request_times[0] - minute_ago)
+            if sleep_time > 0:
+                time.sleep(sleep_time * 0.5)  # 减少等待时间
+            self.request_times = self.request_times[1:]
+        
+        self.request_times.append(current_time)
+
+    def check_url_accessibility(self, url: str) -> Tuple[bool, str]:
+        """优化的URL访问检查"""
+        self._rate_limit()
+        try:
+            session = self._get_session()
+            response = session.head(url, timeout=3, allow_redirects=True)
+            # Consider both 200 and 204 as successful responses
+            if response.status_code in [200, 204]:
+                return True, "Accessible"
+            elif response.status_code == 404:
+                return False, "Channel not found"
+            else:
+                return False, f"HTTP {response.status_code}"
+        except requests.RequestException as e:
+            return False, f"Request error: {str(e)}"
+
+    def batch_validate(self, urls: List[Dict], max_workers: int = 50) -> List[Dict]:
+        """Concurrent URL validation with improved efficiency"""
+        results = []
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_url = {
+                executor.submit(self.validate_single_url, url_data): url_data 
+                for url_data in urls
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_url):
+                result = future.result()
+                results.append(result)
+                
+        return results
+
+    def process_database(self, db_path: str, table_name: str, batch_size: int = 200):
+        """Process URLs from database with optimized batch processing"""
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            
+            # Add the required columns if they don't exist
+            try:
+                cursor.execute(f'PRAGMA table_info("{table_name}")')
+                existing_columns = [row[1] for row in cursor.fetchall()]
+                
+                # Add new columns if they don't exist
+                new_columns = {
+                    'url_verified_status': 'TEXT',
+                    'last_checked': 'TEXT',
+                    'format_valid': 'BOOLEAN',
+                    'format_message': 'TEXT',
+                    'accessible': 'BOOLEAN',
+                    'accessibility_message': 'TEXT'
+                }
+                
+                for col_name, col_type in new_columns.items():
+                    if col_name not in existing_columns:
+                        cursor.execute(f'ALTER TABLE "{table_name}" ADD COLUMN {col_name} {col_type}')
+                conn.commit()
+                
+                # Get total count and unprocessed URLs
+                cursor.execute(f"""
+                    SELECT COUNT(*) 
+                    FROM "{table_name}" 
+                    WHERE url_verified_status IS NULL
+                """)
+                total_urls = cursor.fetchone()[0]
+                
+                if total_urls == 0:
+                    print("No URLs to process!")
+                    return True
+                
+                print(f"Processing {total_urls} URLs...")
+                
+                # Process in larger batches
+                processed = 0
+                with tqdm(total=total_urls, desc="Validating URLs") as pbar:
+                    while processed < total_urls:
+                        # Get next batch of unprocessed URLs
+                        cursor.execute(f"""
+                            SELECT rowid, youtube_channel_url 
+                            FROM "{table_name}"
+                            WHERE url_verified_status IS NULL
+                            LIMIT ?
+                        """, (batch_size,))
+                        batch = cursor.fetchall()
+                        
+                        if not batch:
+                            break
+                        
+                        # Process batch
+                        urls_to_validate = [
+                            {
+                                'rowid': row[0],
+                                'channel_handle': self._extract_handle(row[1]),
+                                'youtube_channel_url': row[1],
+                                'subscribers': None
+                            }
+                            for row in batch
+                        ]
+
+                        results = self.batch_validate(urls_to_validate, max_workers=50)
+                        
+                        # Bulk update using executemany
+                        update_data = [
+                            (
+                                'good' if r['format_valid'] and r['accessible'] else 'bad',
+                                datetime.now().isoformat(),
+                                r['format_valid'],
+                                r['format_message'],
+                                r['accessible'],
+                                r['accessibility_message'],
+                                r['rowid']
+                            )
+                            for r in results
+                        ]
+                        
+                        cursor.executemany(f"""
+                            UPDATE "{table_name}"
+                            SET 
+                                url_verified_status = ?,
+                                last_checked = ?,
+                                format_valid = ?,
+                                format_message = ?,
+                                accessible = ?,
+                                accessibility_message = ?
+                            WHERE rowid = ?
+                        """, update_data)
+                        
+                        conn.commit()
+                        processed += len(batch)
+                        pbar.update(len(batch))
+                
+                return True
+                
+            except sqlite3.Error as e:
+                print(f"Database error: {e}")
+                return False
+
     def validate_url_format(self, url: str) -> Tuple[bool, str]:
         """验证URL格式是否符合YouTube频道URL规范"""
         try:
@@ -26,10 +235,13 @@ class YouTubeURLValidator:
                 if not re.match(r'^[A-Za-z0-9_-]{24}$', channel_id):
                     return False, "Invalid channel ID format"
             elif path.startswith('/@'):
-                # 验证handle格式
+                # 验证handle格式 - 允许更多字符
                 handle = path.split('/@')[1]
-                if not re.match(r'^[A-Za-z0-9_-]{1,30}$', handle):
+                # Allow dots, special characters, and Unicode characters in handles
+                if not re.match(r'^[\w\-.]+(?:\.[a-zA-Z]{2,})?$', handle):
                     return False, "Invalid handle format"
+                if len(handle) > 30:  # YouTube handles have a maximum length
+                    return False, "Handle too long"
             else:
                 return False, "Invalid path format"
                 
@@ -37,41 +249,13 @@ class YouTubeURLValidator:
         except Exception as e:
             return False, f"Format validation error: {str(e)}"
 
-    def check_url_accessibility(self, url: str) -> Tuple[bool, str]:
-        """验证URL是否可访问"""
-        try:
-            response = requests.head(url, headers=self.headers, timeout=5, allow_redirects=True)
-            if response.status_code == 200:
-                return True, "Accessible"
-            elif response.status_code == 404:
-                return False, "Channel not found"
-            else:
-                return False, f"HTTP {response.status_code}"
-        except requests.RequestException as e:
-            return False, f"Request error: {str(e)}"
-
-    def batch_validate(self, urls: List[Dict]) -> List[Dict]:
-        """批量验证URL"""
-        results = []
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_url = {
-                executor.submit(self.validate_single_url, url_data): url_data 
-                for url_data in urls
-            }
-            
-            for future in concurrent.futures.as_completed(future_to_url):
-                result = future.result()
-                results.append(result)
-                
-        return results
-
     def validate_single_url(self, url_data: Dict) -> Dict:
         """验证单个URL并返回结果"""
         url = url_data['youtube_channel_url']
         format_valid, format_msg = self.validate_url_format(url)
         
         result = {
+            'rowid': url_data['rowid'],
             'channel_handle': url_data['channel_handle'],
             'youtube_channel_url': url,
             'subscribers': url_data['subscribers'],
@@ -88,77 +272,6 @@ class YouTubeURLValidator:
             
         return result
 
-    def generate_report(self, results: List[Dict]) -> pd.DataFrame:
-        """生成验证报告"""
-        df = pd.DataFrame(results)
-        
-        # 添加验证状态分类
-        df['validation_status'] = df.apply(
-            lambda row: 'Valid' if row['format_valid'] and row['accessible']
-            else 'Format Invalid' if not row['format_valid']
-            else 'Inaccessible',
-            axis=1
-        )
-        
-        return df
-
-    def save_report(self, df: pd.DataFrame, output_path: str):
-        """保存验证报告"""
-        df.to_csv(output_path, index=False)
-
-    def process_database(self, db_path: str, table_name: str, limit: int = None):
-        """
-        Process URLs from database and update verification status
-        Args:
-            db_path: Path to SQLite database
-            table_name: Name of the table containing URLs
-            limit: Optional limit on number of URLs to process
-        """
-        with sqlite3.connect(db_path) as conn:
-            cursor = conn.cursor()
-
-            # Modify query to include LIMIT if specified
-            query = f"SELECT youtube_channel_url FROM {table_name}"
-            if limit:
-                query += f" LIMIT {limit}"
-            
-            cursor.execute(query)
-            urls = cursor.fetchall()
-            
-            print(f"Processing {len(urls)} URLs...")
-            
-            # Rest of the processing remains the same
-            urls_to_validate = [
-                {
-                    'channel_handle': self._extract_handle(url[0]),
-                    'youtube_channel_url': url[0],
-                    'subscribers': None
-                }
-                for url in urls
-            ]
-
-            results = self.batch_validate(urls_to_validate)
-            
-            # Print some results for debugging
-            print(f"Processed {len(results)} URLs. Updating database...")
-            
-            updated_count = 0
-            for result in results:
-                status = 'good' if result['format_valid'] and result['accessible'] else 'bad'
-                cursor.execute(
-                    f"""
-                    UPDATE {table_name}
-                    SET url_verified_status = ?
-                    WHERE youtube_channel_url = ?
-                    """,
-                    (status, result['youtube_channel_url'])
-                )
-                updated_count += cursor.rowcount
-            
-            print(f"Updated {updated_count} rows in database")
-            conn.commit()
-            return True
-
     def _extract_handle(self, url: str) -> str:
         """Extract channel handle from URL"""
         try:
@@ -171,39 +284,58 @@ class YouTubeURLValidator:
             return ''
 
 def main():
-    validator = YouTubeURLValidator()
+    parser = argparse.ArgumentParser(description='Validate YouTube channel URLs')
+    parser.add_argument('--url', help='Single YouTube channel URL to validate')
+    parser.add_argument('--db-path', help='Path to SQLite database')
+    parser.add_argument('--table-name', help='Name of table containing URLs')
+    parser.add_argument('--url-column', default='youtube_channel_url', help='Name of column containing URLs')
+    parser.add_argument('--batch-size', type=int, default=800, help='Number of URLs to process per batch')
     
-    # Database configuration
-    db_path = '/Users/yuanlu/Code/test/youtube-top-10000-channels/data/output-edit.db'
-    table_name = 'unique_youtube_channel_urls'
-    url_limit = 100  # Set how many URLs to process
+    args = parser.parse_args()
     
-    # Add the new column if it doesn't exist
-    with sqlite3.connect(db_path) as conn:
+    if args.url:
+        validator = YouTubeURLValidator()
+        result = validator.validate_single_url({
+            'rowid': None,
+            'channel_handle': validator._extract_handle(args.url),
+            'youtube_channel_url': args.url,
+            'subscribers': None
+        })
+        print(f"Format valid: {result['format_valid']} ({result['format_message']})")
+        if result['accessible'] is not None:
+            print(f"Accessible: {result['accessible']} ({result['accessibility_message']})")
+    
+    elif args.db_path and args.table_name:
+        # Connect to database
+        conn = sqlite3.connect(args.db_path)
         cursor = conn.cursor()
         
-        # Check if column exists
-        cursor.execute(f"PRAGMA table_info({table_name})")
-        columns = [info[1] for info in cursor.fetchall()]
+        # Check if required columns exist
+        cursor.execute(f'PRAGMA table_info("{args.table_name}")')
+        existing_columns = [row[1] for row in cursor.fetchall()]
         
-        if 'url_verified_status' not in columns:
-            print("Adding url_verified_status column...")
-            cursor.execute(f"""
-                ALTER TABLE {table_name} 
-                ADD COLUMN url_verified_status TEXT
-            """)
-            conn.commit()
-            print("Column added successfully")
-        else:
-            print("url_verified_status column already exists")
-    
-    # Process the database with limit
-    print("Starting URL validation process...")
-    success = validator.process_database(db_path, table_name, limit=url_limit)
-    if success:
-        print("URL validation completed successfully")
+        # Add new columns if they don't exist
+        new_columns = {
+            'url_verified_status': 'TEXT',
+            'last_checked': 'TEXT',
+            'format_valid': 'BOOLEAN',
+            'format_message': 'TEXT',
+            'accessible': 'BOOLEAN',
+            'accessibility_message': 'TEXT'
+        }
+        
+        for col_name, col_type in new_columns.items():
+            if col_name not in existing_columns:
+                print(f"Adding {col_name} column...")
+                cursor.execute(f'ALTER TABLE "{args.table_name}" ADD COLUMN {col_name} {col_type}')
+        conn.commit()
+        
+        # Initialize validator and process URLs
+        validator = YouTubeURLValidator()
+        validator.process_database(args.db_path, args.table_name, args.batch_size)
+        
     else:
-        print("URL validation encountered errors")
+        parser.print_help()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
