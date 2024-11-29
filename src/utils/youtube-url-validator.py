@@ -12,7 +12,8 @@ Usage:
     Bulk validation from database:
         python youtube-url-validator.py --db-path /path/to/database.db --table-name youtube_channels --url-column youtube_channel_url --batch-size 800
         python src/utils/youtube-url-validator.py --db-path /Users/yuanlu/Code/test/youtube-top-10000-channels/data/hyperauditor-top-youtube-channels.db --table-name "hyperauditor-top-youtube-channels" --url-column "YouTube_Channel_URL" --batch-size 800
-
+        python src/utils/youtube-url-validator.py --db-path /Users/yuanlu/Code/test/youtube-top-10000-channels/data/output-edit.db --table-name "unique_youtube_channel_urls" --url-column "YouTube_Channel_URL" --batch-size 800
+data/output-edit.db
 Options:
     --url TEXT          Single YouTube channel URL to validate
     --db-path TEXT      Path to SQLite database
