@@ -16,6 +16,10 @@ from typing import Optional
 from youtube_url_validator import YouTubeValidator
 import argparse
 import sys
+import json
+from enum import Enum
+from datetime import datetime
+import time
 
 # Configure root logger to output to both file and console
 logging.basicConfig(
@@ -26,6 +30,44 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
+
+class ValidationStatus(Enum):
+    """Enumeration for validation status tracking."""
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+class ProcessingStats:
+    """Class to track processing statistics."""
+    def __init__(self):
+        self.start_time = datetime.now()
+        self.processed_count = 0
+        self.valid_count = 0
+        self.invalid_count = 0
+        self.error_count = 0
+        self.last_batch_time = datetime.now()
+
+    def update(self, batch_results: list) -> None:
+        """Update processing statistics."""
+        now = datetime.now()
+        self.processed_count += len(batch_results)
+        self.valid_count += sum(1 for r in batch_results if r['is_valid'])
+        self.invalid_count += sum(1 for r in batch_results if not r['is_valid'])
+        self.error_count += sum(1 for r in batch_results if r['error'])
+        
+        # Calculate processing rate
+        batch_duration = (now - self.last_batch_time).total_seconds()
+        self.last_batch_time = now
+        
+        return {
+            'processed': self.processed_count,
+            'valid': self.valid_count,
+            'invalid': self.invalid_count,
+            'errors': self.error_count,
+            'rate': len(batch_results) / batch_duration if batch_duration > 0 else 0,
+            'elapsed': (now - self.start_time).total_seconds()
+        }
 
 class YoutubeCSVValidator:
     """
@@ -59,7 +101,12 @@ class YoutubeCSVValidator:
         self._limit = limit
         self._validator = YouTubeValidator()
         self._df: Optional[pd.DataFrame] = None
+        self._output_file = self._generate_output_filename()
+        self._checkpoint_size = 10
+        self._processed_count = self._get_processed_count()
         self._setup_logging()
+        self._status_file = self._input_file.parent / f"{self._input_file.stem}_status.json"
+        self._status = self._load_status()
 
     def _setup_logging(self) -> None:
         """Configure logging for the validator."""
@@ -109,19 +156,96 @@ class YoutubeCSVValidator:
             logging.error(f"Error loading CSV file: {str(e)}")
             raise
 
+    def _get_processed_count(self) -> int:
+        """Get the number of already processed URLs with valid results."""
+        try:
+            if self._output_file.exists():
+                df = pd.read_csv(self._output_file)
+                if 'Is_Valid' in df.columns:
+                    # Count rows where Is_Valid is not null
+                    return df['Is_Valid'].notna().sum()
+            return 0
+        except Exception as e:
+            logging.warning(f"Error reading existing output file: {e}")
+            return 0
+
+    def _save_checkpoint(self, results: list, start_idx: int) -> None:
+        """Save a checkpoint of processed results to CSV with retry mechanism."""
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                # Create backup of existing file if it exists
+                if self._output_file.exists():
+                    backup_file = self._output_file.parent / f"{self._output_file.stem}_backup{self._output_file.suffix}"
+                    import shutil
+                    shutil.copy2(self._output_file, backup_file)
+                
+                # Create DataFrame for this batch
+                batch_df = pd.DataFrame(results)
+                
+                if self._output_file.exists() and start_idx > 0:
+                    # Read existing data
+                    existing_df = pd.read_csv(self._output_file)
+                    
+                    # Update only new results, preserving existing validated entries
+                    for idx, row in batch_df.iterrows():
+                        url = row[self._url_column]
+                        # Update or append based on URL match
+                        mask = existing_df[self._url_column] == url
+                        if mask.any():
+                            # Update existing entry if Is_Valid is null
+                            null_mask = existing_df.loc[mask, 'Is_Valid'].isna()
+                            if null_mask.any():
+                                existing_df.loc[mask & null_mask] = row
+                        else:
+                            # Append new entry
+                            existing_df = pd.concat([existing_df, pd.DataFrame([row])], ignore_index=True)
+                    
+                    existing_df.to_csv(self._output_file, index=False)
+                else:
+                    # First batch - save directly
+                    batch_df.to_csv(self._output_file, index=False)
+                
+                logging.info(f"Saved checkpoint at index {start_idx + len(results)}")
+                
+                self._update_status(results)
+                # Remove backup if save was successful
+                if backup_file.exists():
+                    backup_file.unlink()
+                return
+                
+            except Exception as e:
+                retry_count += 1
+                logging.error(f"Checkpoint save attempt {retry_count} failed: {e}")
+                if retry_count == max_retries:
+                    self._status['status'] = ValidationStatus.FAILED.value
+                    self._status['errors'].append(str(e))
+                    self._update_status([])
+                    raise
+                time.sleep(1)  # Wait before retry
+
     def _validate_urls(self) -> None:
-        """Validate URLs and add results to the DataFrame."""
+        """Validate URLs with progress tracking."""
+        stats = ProcessingStats()
+        
         if self._df is None:
             raise ValueError("DataFrame not initialized. Call load_csv first.")
 
-        logging.info(f"Starting URL validation for {len(self._df)} URLs...")
-        results = []
+        total_urls = len(self._df)
+        logging.info(f"Starting URL validation from index {self._processed_count} of {total_urls} URLs...")
         
-        for index, url in enumerate(self._df[self._url_column]):
-            logging.info(f"Processing URL {index + 1}/{len(self._df)}: {url}")
+        # Skip already processed URLs
+        remaining_df = self._df.iloc[self._processed_count:]
+        current_batch = []
+        
+        for index, url in enumerate(remaining_df[self._url_column], start=self._processed_count):
+            logging.info(f"Processing URL {index + 1}/{total_urls}: {url}")
             try:
                 if pd.isna(url):
                     result = {
+                        self._url_column: url,
                         'validated_url': '',
                         'is_valid': False,
                         'channel_id': '',
@@ -132,6 +256,7 @@ class YoutubeCSVValidator:
                 else:
                     validation_result = self._validator.validate_url(url)
                     result = {
+                        self._url_column: url,
                         'validated_url': validation_result.url,
                         'is_valid': validation_result.is_valid,
                         'channel_id': validation_result.channel_id or '',
@@ -142,6 +267,7 @@ class YoutubeCSVValidator:
             except Exception as e:
                 logging.error(f"Error validating URL {url}: {str(e)}")
                 result = {
+                    self._url_column: url,
                     'validated_url': url,
                     'is_valid': False,
                     'channel_id': '',
@@ -149,46 +275,71 @@ class YoutubeCSVValidator:
                     'subscribers': 0,
                     'error': str(e)
                 }
-            results.append(result)
             
-            if (index + 1) % 10 == 0:
-                logging.info(f"Processed {index + 1} URLs...")
+            current_batch.append(result)
+            
+            # Save checkpoint every self._checkpoint_size URLs
+            if len(current_batch) >= self._checkpoint_size:
+                self._save_checkpoint(current_batch, index - len(current_batch) + 1)
+                progress_stats = stats.update(current_batch)
+                logging.info(
+                    f"Progress: {progress_stats['processed']}/{total_urls} "
+                    f"(Valid: {progress_stats['valid']}, "
+                    f"Invalid: {progress_stats['invalid']}, "
+                    f"Rate: {progress_stats['rate']:.2f} URLs/sec)"
+                )
+                current_batch = []
         
-        logging.info("URL validation completed. Adding results to DataFrame...")
+        # Save any remaining results
+        if current_batch:
+            self._save_checkpoint(current_batch, total_urls - len(current_batch))
         
-        # Add results to DataFrame
-        self._df['Validated_Youtube_Channel_URL'] = [r['validated_url'] for r in results]
-        self._df['Is_Valid'] = [r['is_valid'] for r in results]
-        self._df['Channel_ID'] = [r['channel_id'] for r in results]
-        self._df['Handle'] = [r['handle'] for r in results]
-        self._df['Subscribers'] = [r['subscribers'] for r in results]
-        self._df['Validation_Error'] = [r.get('error', '') for r in results]
+        logging.info("URL validation completed.")
         
-        logging.info("Results added to DataFrame successfully.")
-
-    def _save_validated_csv(self) -> None:
-        """Save the validated results to a new CSV file."""
-        if self._df is None:
-            raise ValueError("No data to save. Process the URLs first.")
-        
-        output_file = self._generate_output_filename()
-        try:
-            self._df.to_csv(output_file, index=False)
-            logging.info(f"Successfully saved validated results to: {output_file}")
-        except Exception as e:
-            logging.error(f"Error saving validated results: {str(e)}")
-            raise
+        # Load the final results into self._df
+        self._df = pd.read_csv(self._output_file)
 
     def process(self) -> None:
         """Process the CSV file: load, validate URLs, and save results."""
         try:
             self._load_csv()
             self._validate_urls()
-            self._save_validated_csv()
             logging.info("URL validation process completed successfully")
         except Exception as e:
             logging.error(f"Error during processing: {str(e)}")
             raise
+
+    def _load_status(self) -> dict:
+        """Load processing status from status file."""
+        try:
+            if self._status_file.exists():
+                with open(self._status_file, 'r') as f:
+                    return json.load(f)
+            return {
+                'status': ValidationStatus.PENDING.value,
+                'last_processed_index': 0,
+                'last_update': None,
+                'total_processed': 0,
+                'total_valid': 0,
+                'total_invalid': 0,
+                'errors': []
+            }
+        except Exception as e:
+            logging.warning(f"Error loading status file: {e}")
+            return self._create_new_status()
+
+    def _update_status(self, batch_results: list) -> None:
+        """Update and save processing status."""
+        try:
+            self._status['last_update'] = datetime.now().isoformat()
+            self._status['total_processed'] += len(batch_results)
+            self._status['total_valid'] += sum(1 for r in batch_results if r['is_valid'])
+            self._status['total_invalid'] += sum(1 for r in batch_results if not r['is_valid'])
+            
+            with open(self._status_file, 'w') as f:
+                json.dump(self._status, f, indent=2)
+        except Exception as e:
+            logging.error(f"Error updating status: {e}")
 
 def main():
     """Main entry point for the script."""
