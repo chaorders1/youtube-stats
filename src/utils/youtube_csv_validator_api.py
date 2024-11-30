@@ -4,7 +4,7 @@ Validates YouTube channel URLs from a CSV file and extracts channel information.
 
 Example:
     python youtube_csv_validator_api.py --input_file "channels.csv" --url_column "Youtube_Channel_URL" --api_key "YOUR_API_KEY"
-    python youtube_csv_validator_api.py --input_file "/Users/yuanlu/Code/youtube-top-10000-channels/src/utils/test.csv" --url_column "Youtube_Channel_URL" --api_key "AIzaSyBux9x-GuKazCY6dBjUHf2EnA8GkLpl3k8"
+    python youtube_csv_validator_api.py --input_file "./data/youtube_channels.csv" --url_column "Youtube_Channel_URL" --api_key "YOUR_API_KEY"
 """
 
 import pandas as pd
@@ -17,6 +17,12 @@ import argparse
 import sys
 import time
 import re
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from collections import deque
+import warnings
+from googleapiclient.discovery_cache.base import Cache
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +32,56 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
+
+logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.ERROR)
+warnings.filterwarnings('ignore', message='file_cache is unavailable when using oauth2client >= 4.0.0')
+
+class MemoryCache(Cache):
+    """A simple in-memory cache for Google API discovery documents."""
+    _CACHE = {}
+
+    def get(self, url):
+        return MemoryCache._CACHE.get(url)
+
+    def set(self, url, content):
+        MemoryCache._CACHE[url] = content
+
+class RateLimiter:
+    """Manages API request rates."""
+    def __init__(self, max_requests_per_min: int = 1800000, daily_quota: int = 10000):
+        """
+        Initialize rate limiter.
+        
+        Args:
+            max_requests_per_min (int): Maximum requests allowed per minute
+            daily_quota (int): Daily quota limit
+        """
+        self.max_requests_per_min = max_requests_per_min
+        self.daily_quota = daily_quota
+        self.requests = deque()
+        self.quota_used = 0
+    
+    def can_proceed(self, quota_cost: int) -> bool:
+        """Check if a new request can proceed."""
+        now = datetime.now()
+        
+        # Check minute-based rate limit
+        while self.requests and (now - self.requests[0]).total_seconds() > 60:
+            self.requests.popleft()
+            
+        if len(self.requests) >= self.max_requests_per_min:
+            return False
+            
+        # Check daily quota limit
+        if self.quota_used + quota_cost > self.daily_quota:
+            return False
+            
+        return True
+    
+    def add_request(self, quota_cost: int):
+        """Record a new request."""
+        self.requests.append(datetime.now())
+        self.quota_used += quota_cost
 
 class YouTubeValidator:
     """Validates YouTube channel URLs and extracts channel information using YouTube Data API."""
@@ -37,8 +93,16 @@ class YouTubeValidator:
         Args:
             api_key (str): YouTube Data API key
         """
-        self._youtube = build('youtube', 'v3', developerKey=api_key)
+        self._api_key = api_key
+        self._rate_limiter = RateLimiter(max_requests_per_min=1800000, daily_quota=10000)
+        self._executor = ThreadPoolExecutor(max_workers=10)
+        self._quota_used = 0
+        self._daily_quota = 10000  # Default quota
         
+    def _get_youtube_client(self):
+        """Create a new YouTube client instance for each thread."""
+        return build('youtube', 'v3', developerKey=self._api_key)
+
     def _extract_channel_id(self, url: str) -> Optional[str]:
         """Extract channel ID from various YouTube URL formats."""
         patterns = {
@@ -54,65 +118,70 @@ class YouTubeValidator:
                 return match.group(1)
         return None
 
-    def _get_channel_info(self, identifier: str) -> Dict[str, Any]:
+    async def _wait_for_rate_limit(self, quota_cost: int = 1):
         """
-        Get channel information using YouTube API.
+        Wait until we can make another request.
         
         Args:
-            identifier (str): Channel ID, username, or custom URL
-        
-        Returns:
-            Dict containing channel information
+            quota_cost (int): Cost in quota units for the upcoming request
         """
+        while not self._rate_limiter.can_proceed(quota_cost):
+            await asyncio.sleep(0.005)
+        self._rate_limiter.add_request(quota_cost)
+
+    def _track_quota(self, cost: int):
+        """Track quota usage"""
+        self._quota_used += cost
+        if self._quota_used >= self._daily_quota:
+            raise Exception("Daily quota limit reached")
+            
+    async def get_channel_info_async(self, identifier: str) -> Dict[str, Any]:
+        """Asynchronous version of channel info retrieval."""
+        # Use different quota costs based on the request type
+        quota_cost = 100 if identifier.startswith('@') else 1
+        await self._wait_for_rate_limit(quota_cost)
+        
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            self._get_channel_info_sync,
+            identifier
+        )
+    
+    def _get_channel_info_sync(self, identifier: str) -> Dict[str, Any]:
+        """Synchronous version of get_channel_info."""
         try:
+            youtube = self._get_youtube_client()
+            
+            # Try direct channel.list first for all types (costs only 1 unit)
+            try:
+                channel_response = youtube.channels().list(
+                    id=identifier if identifier.startswith('UC') else None,
+                    forUsername=identifier if not identifier.startswith(('@', 'UC')) else None,
+                    part='snippet,statistics'
+                ).execute()
+                
+                if channel_response['items']:
+                    # Process channel info...
+                    return {...}
+                    
+            except HttpError:
+                pass
+            
+            # Only use search as last resort for custom URLs
             if identifier.startswith('@'):
-                # Handle custom URLs
-                response = self._youtube.search().list(
+                response = youtube.search().list(
                     q=identifier,
                     type='channel',
                     part='id'
                 ).execute()
-                
-                if not response['items']:
-                    return {'error': 'Channel not found'}
-                    
-                channel_id = response['items'][0]['id']['channelId']
-            elif identifier.startswith('UC'):
-                # Direct channel ID
-                channel_id = identifier
-            else:
-                # Handle username
-                response = self._youtube.channels().list(
-                    forUsername=identifier,
-                    part='id'
-                ).execute()
-                
-                if not response['items']:
-                    return {'error': 'Channel not found'}
-                    
-                channel_id = response['items'][0]['id']
-
-            # Get channel details
-            channel_response = self._youtube.channels().list(
-                id=channel_id,
-                part='snippet,statistics'
-            ).execute()
-
-            if not channel_response['items']:
-                return {'error': 'Channel not found'}
-
-            channel = channel_response['items'][0]
-            return {
-                'channel_id': channel['id'],
-                'title': channel['snippet']['title'],
-                'subscribers': int(channel['statistics'].get('subscriberCount', 0)),
-                'handle': channel['snippet'].get('customUrl', ''),
-                'is_valid': True,
-                'error': ''
-            }
+                # Process search results...
 
         except HttpError as e:
-            return {'error': f'API error: {str(e)}', 'is_valid': False}
+            error_message = str(e)
+            if 'quotaExceeded' in error_message:
+                raise Exception("YouTube API quota exceeded") from e
+            return {'error': f'API error: {error_message}', 'is_valid': False}
         except Exception as e:
             return {'error': f'Validation error: {str(e)}', 'is_valid': False}
 
@@ -166,43 +235,104 @@ class YoutubeCSVValidator:
             logging.error(f"Error loading CSV: {str(e)}")
             raise
 
-    def process(self) -> None:
-        """Process the CSV file and validate YouTube channels."""
-        self._load_csv()
+    async def _process_batch(self, batch_df: pd.DataFrame) -> None:
+        """Process a batch of channels concurrently."""
+        tasks = []
+        logging.info(f"Starting batch processing of {len(batch_df)} channels")
         
-        for index, row in self._df.iterrows():
+        for index, row in batch_df.iterrows():
             url = row[self._url_column]
+            channel_id = self._validator._extract_channel_id(url)
             
+            if not channel_id:
+                self._df.loc[index, 'error'] = 'Invalid URL format'
+                self._df.loc[index, 'is_valid'] = False
+                logging.warning(f"Invalid URL format: {url}")
+                continue
+            
+            logging.debug(f"Creating task for channel ID: {channel_id}")
+            task = asyncio.create_task(
+                self._validator.get_channel_info_async(channel_id)
+            )
+            tasks.append((index, task))
+        
+        logging.info(f"Created {len(tasks)} tasks, waiting for completion...")
+        
+        for index, task in tasks:
             try:
-                channel_id = self._validator._extract_channel_id(url)
-                if not channel_id:
-                    self._df.loc[index, 'error'] = 'Invalid URL format'
-                    self._df.loc[index, 'is_valid'] = False
-                    continue
-
-                result = self._validator._get_channel_info(channel_id)
+                result = await task
+                logging.debug(f"Processed channel at index {index}")
                 
-                # Update DataFrame with results
+                if 'error' in result and result['error']:
+                    logging.warning(f"Error for channel at index {index}: {result['error']}")
+                
                 for key, value in result.items():
                     if key in self._df.columns:
                         self._df.loc[index, key] = value
+            except Exception as e:
+                error_msg = str(e)
+                logging.error(f"Error processing channel at index {index}: {error_msg}")
+                self._df.loc[index, 'error'] = error_msg
+                self._df.loc[index, 'is_valid'] = False
+
+    async def process_async(self) -> None:
+        """Process the CSV file asynchronously."""
+        self._load_csv()
+        
+        unprocessed_mask = self._df['subscribers'].isna()
+        remaining_df = self._df[unprocessed_mask]
+        
+        total_channels = len(self._df)
+        remaining_channels = len(remaining_df)
+        processed_channels = total_channels - remaining_channels
+        
+        logging.info(f"Total channels: {total_channels}")
+        logging.info(f"Already processed: {processed_channels}")
+        logging.info(f"Remaining to process: {remaining_channels}")
+        
+        if remaining_channels == 0:
+            logging.info("All channels have been processed. Nothing to do.")
+            return
+        
+        # Calculate safe batch size based on remaining quota
+        remaining_quota = self._validator._daily_quota - self._validator._quota_used
+        estimated_cost_per_channel = 150  # Worst case: search + channel.list
+        safe_batch_size = min(20, remaining_quota // estimated_cost_per_channel)
+        
+        if safe_batch_size == 0:
+            logging.warning("Insufficient quota remaining for processing")
+            return
+            
+        batch_size = safe_batch_size
+        total_batches = (remaining_channels + batch_size - 1) // batch_size
+        
+        for batch_num, start_idx in enumerate(range(0, len(remaining_df), batch_size)):
+            batch_df = remaining_df.iloc[start_idx:start_idx + batch_size]
+            logging.info(f"Processing batch {batch_num + 1}/{total_batches}")
+            
+            try:
+                await self._process_batch(batch_df)
                 
-                # Save progress periodically
-                if index % 10 == 0:
-                    self._df.to_csv(self._input_file, index=False)
-                    logging.info(f"Processed {index + 1}/{len(self._df)} channels")
+                # Save progress after each batch
+                self._df.to_csv(self._input_file, index=False)
+                processed_count = min(start_idx + batch_size, remaining_channels)
+                logging.info(f"Progress: {processed_count}/{remaining_channels} channels processed")
                 
-                # Respect YouTube API quotas
-                time.sleep(0.1)
+                # Add a small delay between batches to prevent overwhelming
+                await asyncio.sleep(0.5)
                 
             except Exception as e:
-                logging.error(f"Error processing URL {url}: {str(e)}")
-                self._df.loc[index, 'error'] = str(e)
-                self._df.loc[index, 'is_valid'] = False
+                logging.error(f"Error processing batch {batch_num + 1}: {str(e)}")
+                # Save progress even if batch fails
+                self._df.to_csv(self._input_file, index=False)
+                # Continue with next batch instead of failing completely
+                continue
         
-        # Save final results
-        self._df.to_csv(self._input_file, index=False)
         logging.info("Processing completed")
+
+    def process(self) -> None:
+        """Synchronous wrapper for async processing."""
+        asyncio.run(self.process_async())
 
 def main():
     """Main entry point for the script."""
