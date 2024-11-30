@@ -6,7 +6,7 @@ Command line arguments:
 Example:
     # Validate YouTube channel URLs from a CSV file
     python youtube_csv_validator.py --input_file "youtube_channel_urls.csv" --url_column "Youtube_Channel_URL" --limit 100
-    python youtube_csv_validator.py --input_file "/Users/yuanlu/Code/youtube-top-10000-channels/src/utils/youtube_channel_urls.csv" --url_column "Youtube_Channel_URL" --limit 100
+    python youtube_csv_validator.py --input_file "/Users/yuanlu/Code/youtube-top-10000-channels/src/utils/youtube_channel_urls_copy.csv" --url_column "Youtube_Channel_URL" --limit 100
 '''
 
 import pandas as pd
@@ -18,8 +18,9 @@ import argparse
 import sys
 import json
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
+import random
 
 # Configure root logger to output to both file and console
 logging.basicConfig(
@@ -101,9 +102,17 @@ class YoutubeCSVValidator:
         self._limit = limit
         self._validator = YouTubeValidator()
         self._df: Optional[pd.DataFrame] = None
-        self._output_file = self._generate_output_filename()
         self._checkpoint_size = 10
-        self._processed_count = self._get_processed_count()
+        self._rate_settings = {
+            'min_delay': 0.2,
+            'max_delay': 2.0,
+            'burst_size': 5,
+            'burst_delay': 5.0,
+            'error_delay': 30.0,
+        }
+        self._request_times = []
+        self._error_count = 0
+        self._last_error_time = None
         self._setup_logging()
         self._status_file = self._input_file.parent / f"{self._input_file.stem}_status.json"
         self._status = self._load_status()
@@ -116,101 +125,70 @@ class YoutubeCSVValidator:
             format='%(asctime)s - %(levelname)s - %(message)s'
         )
 
-    def _generate_output_filename(self) -> Path:
-        """Generate the output filename with '_validated' suffix."""
-        stem = self._input_file.stem
-        return self._input_file.parent / f"{stem}_validated{self._input_file.suffix}"
-
     def _load_csv(self) -> None:
-        """Load the CSV file into a pandas DataFrame."""
+        """Load the CSV file and initialize new columns if needed."""
         try:
-            # First check if file exists
             if not self._input_file.exists():
                 raise FileNotFoundError(f"Input file not found: {self._input_file}")
             
-            # Read CSV in chunks if it's large
-            chunk_size = 10000  # Adjust based on your needs
-            chunks = []
-            total_rows = 0
+            # Read the entire CSV file
+            self._df = pd.read_csv(self._input_file)
             
-            for chunk in pd.read_csv(self._input_file, chunksize=chunk_size):
-                if self._url_column not in chunk.columns:
-                    raise ValueError(f"Column '{self._url_column}' not found in CSV file")
-                
-                if self._limit is not None:
-                    remaining_rows = self._limit - total_rows
-                    if remaining_rows <= 0:
-                        break
-                    if len(chunk) > remaining_rows:
-                        chunk = chunk.iloc[:remaining_rows]
-                
-                chunks.append(chunk)
-                total_rows += len(chunk)
-                
-                if self._limit is not None and total_rows >= self._limit:
-                    break
+            if self._url_column not in self._df.columns:
+                raise ValueError(f"Column '{self._url_column}' not found in CSV file")
             
-            self._df = pd.concat(chunks) if chunks else pd.DataFrame()
+            # Initialize new columns if they don't exist
+            new_columns = {
+                'validated_url': '',
+                'is_valid': pd.NA,
+                'channel_id': '',
+                'handle': '',
+                'subscribers': pd.NA,
+                'error': ''
+            }
+            
+            for col, default_value in new_columns.items():
+                if col not in self._df.columns:
+                    self._df[col] = default_value
+            
+            # Apply limit if specified
+            if self._limit is not None:
+                self._df = self._df.iloc[:self._limit]
+            
             logging.info(f"Successfully loaded CSV file: {self._input_file} ({len(self._df)} rows)")
+        
         except Exception as e:
             logging.error(f"Error loading CSV file: {str(e)}")
             raise
 
-    def _get_processed_count(self) -> int:
-        """Get the number of already processed URLs with valid results."""
-        try:
-            if self._output_file.exists():
-                df = pd.read_csv(self._output_file)
-                if 'Is_Valid' in df.columns:
-                    # Count rows where Is_Valid is not null
-                    return df['Is_Valid'].notna().sum()
-            return 0
-        except Exception as e:
-            logging.warning(f"Error reading existing output file: {e}")
-            return 0
-
     def _save_checkpoint(self, results: list, start_idx: int) -> None:
-        """Save a checkpoint of processed results to CSV with retry mechanism."""
+        """Update the input CSV file with new results."""
         max_retries = 3
         retry_count = 0
         
         while retry_count < max_retries:
             try:
-                # Create backup of existing file if it exists
-                if self._output_file.exists():
-                    backup_file = self._output_file.parent / f"{self._output_file.stem}_backup{self._output_file.suffix}"
-                    import shutil
-                    shutil.copy2(self._output_file, backup_file)
+                # Create backup of existing file
+                backup_file = self._input_file.parent / f"{self._input_file.stem}_backup.csv"
+                self._df.to_csv(backup_file, index=False)
                 
-                # Create DataFrame for this batch
-                batch_df = pd.DataFrame(results)
+                # Update the DataFrame with new results
+                for result in results:
+                    url = result[self._url_column]
+                    # Find the row index for this URL
+                    idx = self._df[self._df[self._url_column] == url].index
+                    if len(idx) > 0:
+                        # Update all columns except the URL column
+                        for key, value in result.items():
+                            if key != self._url_column:
+                                self._df.loc[idx[0], key] = value
                 
-                if self._output_file.exists() and start_idx > 0:
-                    # Read existing data
-                    existing_df = pd.read_csv(self._output_file)
-                    
-                    # Update only new results, preserving existing validated entries
-                    for idx, row in batch_df.iterrows():
-                        url = row[self._url_column]
-                        # Update or append based on URL match
-                        mask = existing_df[self._url_column] == url
-                        if mask.any():
-                            # Update existing entry if Is_Valid is null
-                            null_mask = existing_df.loc[mask, 'Is_Valid'].isna()
-                            if null_mask.any():
-                                existing_df.loc[mask & null_mask] = row
-                        else:
-                            # Append new entry
-                            existing_df = pd.concat([existing_df, pd.DataFrame([row])], ignore_index=True)
-                    
-                    existing_df.to_csv(self._output_file, index=False)
-                else:
-                    # First batch - save directly
-                    batch_df.to_csv(self._output_file, index=False)
+                # Save the updated DataFrame back to the original file
+                self._df.to_csv(self._input_file, index=False)
                 
                 logging.info(f"Saved checkpoint at index {start_idx + len(results)}")
-                
                 self._update_status(results)
+                
                 # Remove backup if save was successful
                 if backup_file.exists():
                     backup_file.unlink()
@@ -224,25 +202,64 @@ class YoutubeCSVValidator:
                     self._status['errors'].append(str(e))
                     self._update_status([])
                     raise
-                time.sleep(1)  # Wait before retry
+                time.sleep(1)
+
+    def _get_delay(self) -> float:
+        """
+        Determine the appropriate delay before the next request based on recent activity.
+        """
+        now = datetime.now()
+        
+        # Clean up old request times (older than 60 seconds)
+        self._request_times = [t for t in self._request_times 
+                             if now - t < timedelta(seconds=60)]
+        
+        # If we've had recent errors, increase delays
+        if self._last_error_time and now - self._last_error_time < timedelta(seconds=300):
+            return max(
+                self._rate_settings['error_delay'],
+                random.uniform(self._rate_settings['max_delay'], 
+                             self._rate_settings['max_delay'] * 2)
+            )
+        
+        # Check if we're in a burst
+        recent_requests = len([t for t in self._request_times 
+                             if now - t < timedelta(seconds=5)])
+        
+        if recent_requests >= self._rate_settings['burst_size']:
+            return self._rate_settings['burst_delay']
+        
+        # Return random delay within configured range
+        return random.uniform(
+            self._rate_settings['min_delay'],
+            self._rate_settings['max_delay']
+        )
 
     def _validate_urls(self) -> None:
-        """Validate URLs with progress tracking."""
+        """Validate URLs with improved rate limiting and resume capability."""
         stats = ProcessingStats()
         
         if self._df is None:
             raise ValueError("DataFrame not initialized. Call load_csv first.")
 
         total_urls = len(self._df)
-        logging.info(f"Starting URL validation from index {self._processed_count} of {total_urls} URLs...")
         
-        # Skip already processed URLs
-        remaining_df = self._df.iloc[self._processed_count:]
+        # Create a mask for unprocessed rows (where subscribers is NA)
+        unprocessed_mask = self._df['subscribers'].isna()
+        remaining_df = self._df[unprocessed_mask].copy()
+        
+        logging.info(f"Found {len(remaining_df)} unprocessed URLs out of {total_urls} total URLs")
+        
         current_batch = []
         
-        for index, url in enumerate(remaining_df[self._url_column], start=self._processed_count):
-            logging.info(f"Processing URL {index + 1}/{total_urls}: {url}")
+        for index, row in remaining_df.iterrows():
+            url = row[self._url_column]
+            logging.info(f"Processing URL at index {index}: {url}")
+            
             try:
+                delay = self._get_delay()
+                time.sleep(delay)
+                
                 if pd.isna(url):
                     result = {
                         self._url_column: url,
@@ -255,6 +272,9 @@ class YoutubeCSVValidator:
                     }
                 else:
                     validation_result = self._validator.validate_url(url)
+                    self._request_times.append(datetime.now())
+                    self._error_count = max(0, self._error_count - 1)
+                    
                     result = {
                         self._url_column: url,
                         'validated_url': validation_result.url,
@@ -264,7 +284,14 @@ class YoutubeCSVValidator:
                         'subscribers': validation_result.subscribers or 0,
                         'error': validation_result.error_message or ''
                     }
+            
             except Exception as e:
+                error_message = str(e).lower()
+                if any(term in error_message for term in ['rate limit', '429', 'too many requests']):
+                    self._error_count += 1
+                    self._last_error_time = datetime.now()
+                    logging.warning(f"Rate limit detected. Increasing delays. Error count: {self._error_count}")
+                
                 logging.error(f"Error validating URL {url}: {str(e)}")
                 result = {
                     self._url_column: url,
@@ -278,26 +305,21 @@ class YoutubeCSVValidator:
             
             current_batch.append(result)
             
-            # Save checkpoint every self._checkpoint_size URLs
             if len(current_batch) >= self._checkpoint_size:
                 self._save_checkpoint(current_batch, index - len(current_batch) + 1)
                 progress_stats = stats.update(current_batch)
                 logging.info(
-                    f"Progress: {progress_stats['processed']}/{total_urls} "
+                    f"Progress: {progress_stats['processed']}/{len(remaining_df)} "
                     f"(Valid: {progress_stats['valid']}, "
                     f"Invalid: {progress_stats['invalid']}, "
                     f"Rate: {progress_stats['rate']:.2f} URLs/sec)"
                 )
                 current_batch = []
         
-        # Save any remaining results
         if current_batch:
-            self._save_checkpoint(current_batch, total_urls - len(current_batch))
+            self._save_checkpoint(current_batch, len(remaining_df) - len(current_batch))
         
         logging.info("URL validation completed.")
-        
-        # Load the final results into self._df
-        self._df = pd.read_csv(self._output_file)
 
     def process(self) -> None:
         """Process the CSV file: load, validate URLs, and save results."""
