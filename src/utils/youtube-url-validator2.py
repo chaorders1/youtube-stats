@@ -20,12 +20,13 @@ Examples:
                                    --url-column Youtube_Channel_URL \
                                    --output-db /Users/yuanlu/Code/youtube-top-10000-channels/data/output.db \
                                    --output-table youtube_channel_info \
-                                   --batch-size 100
+                                   --batch-size 800
 
 
 """
 
-import requests
+import aiohttp
+import asyncio
 import re
 import time
 import logging
@@ -33,11 +34,8 @@ from urllib.parse import urlparse
 import argparse
 import sqlite3
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional, Dict, Tuple, List
+from typing import Optional, Dict, Tuple, List, Any
 from dataclasses import dataclass
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from contextlib import contextmanager
 from datetime import datetime
 import sys
@@ -64,32 +62,134 @@ class ChannelInfo:
     subscribers: Optional[str] = None
     error_message: Optional[str] = None
 
+class YouTubeValidatorError(Exception):
+    """Base exception class for YouTubeValidator errors"""
+    pass
+
 class YouTubeValidator:
-    """Handles YouTube channel URL validation and information extraction"""
+    """Handles YouTube channel URL validation and information extraction using aiohttp"""
     
-    def __init__(self, max_retries: int = 3, timeout: int = 10):
-        self.session = self._create_session(max_retries, timeout)
+    def __init__(self, 
+                 max_retries: int = 3, 
+                 timeout: int = 10, 
+                 min_request_interval: float = 0.5,
+                 max_concurrent_requests: int = 30):
+        """
+        Initialize YouTubeValidator with configurable parameters.
+        
+        Args:
+            max_retries: Maximum number of retry attempts for failed requests
+            timeout: Request timeout in seconds
+            min_request_interval: Minimum time between requests in seconds
+            max_concurrent_requests: Maximum number of concurrent requests
+        """
+        self.max_retries = max_retries
+        self.timeout = timeout
+        self.min_request_interval = min_request_interval
+        self.max_concurrent_requests = max_concurrent_requests
         self._compile_patterns()
+        self._last_request_time = 0.0
+        self._semaphore: Optional[asyncio.Semaphore] = None
 
-    def _create_session(self, max_retries: int, timeout: int) -> requests.Session:
-        """Create a requests session with retry strategy"""
-        session = requests.Session()
-        retry_strategy = Retry(
-            total=max_retries,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504]
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-        })
-        return session
+    async def _get_semaphore(self) -> asyncio.Semaphore:
+        """Get or create the rate limiting semaphore"""
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self.max_concurrent_requests)
+        return self._semaphore
 
-    def _compile_patterns(self):
+    async def _fetch(self, session: aiohttp.ClientSession, url: str) -> str:
+        """
+        Fetch the content of a URL asynchronously with rate limiting and retries.
+        
+        Args:
+            session: aiohttp client session
+            url: URL to fetch
+            
+        Returns:
+            str: HTML content of the page
+            
+        Raises:
+            YouTubeValidatorError: If all retry attempts fail
+        """
+        semaphore = await self._get_semaphore()
+        async with semaphore:
+            current_time = time.time()
+            time_since_last_request = current_time - self._last_request_time
+            if time_since_last_request < self.min_request_interval:
+                await asyncio.sleep(self.min_request_interval - time_since_last_request)
+            
+            for attempt in range(self.max_retries):
+                try:
+                    timeout = aiohttp.ClientTimeout(total=self.timeout)
+                    async with session.get(url, timeout=timeout) as response:
+                        self._last_request_time = time.time()
+                        
+                        if response.status == 429:  # Rate limit hit
+                            wait_time = int(response.headers.get('Retry-After', 60))
+                            logger.warning(f"Rate limited. Waiting {wait_time} seconds...")
+                            await asyncio.sleep(wait_time)
+                            continue
+                            
+                        if response.status == 200:
+                            return await response.text()
+                        else:
+                            logger.warning(f"HTTP {response.status} for {url}")
+                            
+                except asyncio.TimeoutError:
+                    logger.error(f"Timeout on attempt {attempt + 1} for {url}")
+                    if attempt < self.max_retries - 1:
+                        await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                except Exception as e:
+                    logger.error(f"Attempt {attempt + 1} failed for {url}: {str(e)}")
+                    if attempt < self.max_retries - 1:
+                        await asyncio.sleep(2 ** attempt)
+            
+            raise YouTubeValidatorError(f"Failed to fetch {url} after {self.max_retries} attempts")
+
+    async def validate_url(self, session: aiohttp.ClientSession, url: str) -> ChannelInfo:
+        """
+        Validate a YouTube channel URL and extract information asynchronously.
+        
+        Args:
+            session: aiohttp client session
+            url: YouTube channel URL to validate
+            
+        Returns:
+            ChannelInfo: Object containing validation results and channel information
+        """
+        try:
+            if not url or not isinstance(url, str):
+                return ChannelInfo(url=str(url), is_valid=False, error_message="Invalid URL format")
+
+            parsed_url = urlparse(url)
+            if not parsed_url.scheme:
+                url = 'https://' + url
+            
+            if not any(domain in url.lower() for domain in ['youtube.com', 'youtu.be']):
+                return ChannelInfo(url=url, is_valid=False, error_message="Not a YouTube URL")
+
+            html_content = await self._fetch(session, url)
+            channel_info = self._extract_channel_info(html_content)
+            
+            if not channel_info.get('channel_id'):
+                return ChannelInfo(url=url, is_valid=False, error_message="Could not extract channel information")
+
+            return ChannelInfo(
+                url=url,
+                is_valid=True,
+                channel_id=channel_info.get('channel_id'),
+                handle=channel_info.get('handle'),
+                subscribers=channel_info.get('subscribers')
+            )
+
+        except YouTubeValidatorError as e:
+            logger.error(f"Validation error for URL {url}: {str(e)}")
+            return ChannelInfo(url=url, is_valid=False, error_message=str(e))
+        except Exception as e:
+            logger.error(f"Unexpected error validating URL {url}: {str(e)}")
+            return ChannelInfo(url=url, is_valid=False, error_message=f"Unexpected error: {str(e)}")
+
+    def _compile_patterns(self) -> None:
         """Compile regex patterns for better performance"""
         self.channel_id_patterns = [
             re.compile(pattern) for pattern in [
@@ -114,51 +214,21 @@ class YouTubeValidator:
             ]
         ]
 
-    def validate_url(self, url: str) -> ChannelInfo:
-        """Validate a YouTube channel URL and extract information"""
-        try:
-            # Clean URL
-            parsed_url = urlparse(url)
-            if not parsed_url.scheme:
-                url = 'https://' + url
-            
-            if not any(domain in url.lower() for domain in ['youtube.com', 'youtu.be']):
-                return ChannelInfo(url=url, is_valid=False, error_message="Not a YouTube URL")
-
-            response = self.session.get(url, timeout=10)
-            
-            if response.status_code != 200:
-                return ChannelInfo(
-                    url=url,
-                    is_valid=False,
-                    error_message=f"HTTP {response.status_code}"
-                )
-
-            # Extract information
-            channel_info = self._extract_channel_info(response.text)
-            
-            if not channel_info.get('channel_id'):
-                return ChannelInfo(
-                    url=url,
-                    is_valid=False,
-                    error_message="Could not extract channel information"
-                )
-
-            return ChannelInfo(
-                url=url,
-                is_valid=True,
-                channel_id=channel_info.get('channel_id'),
-                handle=channel_info.get('handle'),
-                subscribers=channel_info.get('subscribers')
-            )
-
-        except Exception as e:
-            logger.error(f"Error processing {url}: {str(e)}")
-            return ChannelInfo(url=url, is_valid=False, error_message=str(e))
-
     def _extract_channel_info(self, html_content: str) -> Dict[str, Optional[str]]:
-        """Extract channel information from HTML content"""
-        info = {}
+        """
+        Extract channel information from HTML content.
+        
+        Args:
+            html_content: HTML content of the YouTube channel page
+            
+        Returns:
+            Dict containing extracted channel information
+        """
+        info: Dict[str, Optional[str]] = {
+            'channel_id': None,
+            'handle': None,
+            'subscribers': None
+        }
         
         # Extract channel ID
         for pattern in self.channel_id_patterns:
@@ -181,138 +251,247 @@ class YouTubeValidator:
 
         return info
 
+class DatabaseError(Exception):
+    """Base exception class for database errors"""
+    pass
+
 class DatabaseManager:
     """Manages database connections and operations"""
     
     def __init__(self, input_db: str, output_db: str):
+        """
+        Initialize DatabaseManager.
+        
+        Args:
+            input_db: Path to input SQLite database
+            output_db: Path to output SQLite database
+        """
         self.input_db = input_db
         self.output_db = output_db
+        self._ensure_output_db_exists()
         self._init_output_db()
+        self._verify_tables()
 
-    def _init_output_db(self):
+    @contextmanager
+    def _get_connection(self, db_path: str):
+        """
+        Context manager for database connections with proper cleanup.
+        
+        Args:
+            db_path: Path to SQLite database
+            
+        Yields:
+            sqlite3.Connection: Database connection
+        """
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path)
+            yield conn
+        except sqlite3.Error as e:
+            logger.error(f"Database error: {e}")
+            raise DatabaseError(f"Database error: {e}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception as e:
+                    logger.error(f"Error closing database connection: {e}")
+
+    def _ensure_output_db_exists(self) -> None:
+        """Ensure the output database file exists"""
+        output_path = Path(self.output_db)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        if not output_path.exists():
+            logger.info(f"Creating new database file: {self.output_db}")
+            with self._get_connection(self.output_db) as conn:
+                pass
+
+    def _init_output_db(self) -> None:
         """Initialize output database schema"""
-        with self._get_output_connection() as conn:
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS youtube_channel_info (
-                    url TEXT PRIMARY KEY,
-                    url_status_code INTEGER,
-                    url_status TEXT,
-                    youtube_channel_id TEXT,
-                    youtube_channel_handle TEXT,
-                    subscriber_count TEXT,
-                    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    batch_id TEXT
-                )
-            ''')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_batch_id ON youtube_channel_info(batch_id)')
-
-    @contextmanager
-    def _get_input_connection(self):
-        """Context manager for input database connection"""
-        conn = sqlite3.connect(self.input_db)
         try:
-            yield conn
-        finally:
-            conn.close()
+            with self._get_connection(self.output_db) as conn:
+                logger.info("Creating youtube_channel_info table if not exists")
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS youtube_channel_info (
+                        url TEXT PRIMARY KEY,
+                        url_status_code INTEGER,
+                        url_status TEXT,
+                        youtube_channel_id TEXT,
+                        youtube_channel_handle TEXT,
+                        subscriber_count TEXT,
+                        processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        batch_id TEXT
+                    )
+                ''')
+                conn.commit()
+                logger.info("Table creation completed")
+        except Exception as e:
+            logger.error(f"Database initialization error: {e}")
+            raise DatabaseError(f"Database initialization error: {e}")
 
-    @contextmanager
-    def _get_output_connection(self):
-        """Context manager for output database connection"""
-        conn = sqlite3.connect(self.output_db)
+    def _verify_tables(self) -> None:
+        """Verify that required tables exist"""
         try:
-            yield conn
-        finally:
-            conn.close()
+            with self._get_connection(self.output_db) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT name FROM sqlite_master 
+                    WHERE type='table' AND name='youtube_channel_info'
+                """)
+                if not cursor.fetchone():
+                    raise DatabaseError("youtube_channel_info table was not created properly")
+                logger.info("Table verification successful")
+        except Exception as e:
+            logger.error(f"Database verification failed: {e}")
+            raise DatabaseError(f"Database verification failed: {e}")
 
-    def get_unprocessed_urls(self, table: str, url_column: str, batch_size: int, 
-                            batch_id: str) -> List[str]:
-        """Get URLs that haven't been processed yet"""
-        with self._get_input_connection() as in_conn, self._get_output_connection() as out_conn:
-            query = f"""
-                SELECT a.{url_column} 
-                FROM {table} a
-                LEFT JOIN youtube_channel_info b ON a.{url_column} = b.url
-                WHERE b.url IS NULL
-                LIMIT {batch_size}
-            """
-            return [row[0] for row in in_conn.execute(query).fetchall()]
+    def get_unprocessed_urls(self, table: str, url_column: str, batch_size: int, offset: int) -> List[str]:
+        """
+        Get URLs that haven't been processed yet.
+        
+        Args:
+            table: Input table name
+            url_column: Column name containing URLs
+            batch_size: Number of URLs to retrieve
+            offset: Starting offset
+            
+        Returns:
+            List of unprocessed URLs
+        """
+        try:
+            with self._get_connection(self.input_db) as conn:
+                cursor = conn.cursor()
+                cursor.execute(f"""
+                    SELECT name FROM sqlite_master 
+                    WHERE type='table' AND name=?
+                """, (table,))
+                if not cursor.fetchone():
+                    raise DatabaseError(f"Input table '{table}' does not exist")
 
-    def save_results(self, results: List[ChannelInfo], batch_id: str):
-        """Save validation results to database"""
-        with self._get_output_connection() as conn:
-            conn.executemany('''
-                INSERT OR REPLACE INTO youtube_channel_info 
-                (url, url_status_code, url_status, youtube_channel_id, 
-                youtube_channel_handle, subscriber_count, batch_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', [
-                (
-                    result.url,
-                    200 if result.is_valid else 400,
-                    'valid' if result.is_valid else result.error_message,
-                    result.channel_id,
-                    result.handle,
-                    result.subscribers,
-                    batch_id
-                )
-                for result in results
-            ])
-            conn.commit()
+                query = f"""
+                    SELECT DISTINCT {url_column} 
+                    FROM {table}
+                    LIMIT {batch_size} OFFSET {offset}
+                """
+                return [row[0] for row in cursor.execute(query).fetchall()]
+        except Exception as e:
+            logger.error(f"Error getting unprocessed URLs: {e}")
+            raise DatabaseError(f"Error getting unprocessed URLs: {e}")
+
+    def save_results(self, results: List[ChannelInfo], batch_id: str) -> None:
+        """
+        Save validation results to database.
+        
+        Args:
+            results: List of ChannelInfo objects
+            batch_id: Identifier for the current batch
+        """
+        try:
+            with self._get_connection(self.output_db) as conn:
+                conn.executemany('''
+                    INSERT OR REPLACE INTO youtube_channel_info 
+                    (url, url_status_code, url_status, youtube_channel_id, 
+                    youtube_channel_handle, subscriber_count, batch_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', [
+                    (
+                        result.url,
+                        200 if result.is_valid else 400,
+                        'valid' if result.is_valid else result.error_message,
+                        result.channel_id,
+                        result.handle,
+                        result.subscribers,
+                        batch_id
+                    )
+                    for result in results
+                ])
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error saving results: {e}")
+            raise DatabaseError(f"Error saving results: {e}")
 
     def get_total_urls(self, table: str) -> int:
         """Get total number of URLs in the input table"""
-        with self._get_input_connection() as conn:
+        with self._get_connection(self.input_db) as conn:
             cursor = conn.execute(f"SELECT COUNT(*) FROM {table}")
             return cursor.fetchone()[0]
 
     def get_last_processed_offset(self, table: str) -> int:
         """Get the last processed offset from the output table"""
-        with self._get_output_connection() as conn:
+        with self._get_connection(self.output_db) as conn:
             cursor = conn.execute(f"SELECT COUNT(*) FROM {table}")
             return cursor.fetchone()[0]
 
-def process_urls_parallel(validator: YouTubeValidator, urls: List[str], 
-                         max_workers: int = 30) -> List[ChannelInfo]:
-    """Process URLs in parallel using ThreadPoolExecutor"""
+async def process_urls_async(validator: YouTubeValidator, urls: List[str], 
+                           max_concurrent_requests: int = 30) -> List[ChannelInfo]:
+    """Process URLs asynchronously using aiohttp with concurrency control"""
     results = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_url = {executor.submit(validator.validate_url, url): url 
-                        for url in urls}
-        
-        for future in tqdm(as_completed(future_to_url), total=len(urls)):
-            results.append(future.result())
-            time.sleep(0.1)  # Reduced sleep time for faster processing
+    semaphore = asyncio.Semaphore(max_concurrent_requests)
+    
+    async def process_with_semaphore(url: str) -> ChannelInfo:
+        async with semaphore:
+            return await validator.validate_url(session, url)
+    
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=30),
+        headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+        }
+    ) as session:
+        tasks = [process_with_semaphore(url) for url in urls]
+        for future in tqdm(asyncio.as_completed(tasks), total=len(urls)):
+            try:
+                result = await future
+                results.append(result)
+            except Exception as e:
+                logger.error(f"Error processing URL: {e}")
+                continue
+    
     return results
 
-def process_database(input_db: str, input_table: str, url_column: str, 
-                    output_db: str, output_table: str, batch_size: int = 800) -> None:
-    """
-    Process URLs from input database and save results to output database.
-    """
+async def process_database_async(input_db: str, input_table: str, url_column: str, 
+                                 output_db: str, output_table: str, batch_size: int = 800) -> None:
+    """Process URLs from input database with improved error handling"""
     validator = YouTubeValidator()
     db_manager = DatabaseManager(input_db, output_db)
     
     try:
         total_urls = db_manager.get_total_urls(input_table)
-        print(f"Total URLs to process: {total_urls}")
+        logger.info(f"Total URLs to process: {total_urls}")
         
         offset = db_manager.get_last_processed_offset(output_table)
-        print(f"Resuming from offset: {offset}")
+        logger.info(f"Resuming from offset: {offset}")
         
-        while True:
-            urls = db_manager.get_unprocessed_urls(input_table, url_column, batch_size, offset)
-            if not urls:
-                break
-            
-            print(f"Processing batch starting at offset {offset}")
-            results = process_urls_parallel(validator, urls, max_workers=30)
-            db_manager.save_results(results, batch_id=str(offset))
-            
-            offset += batch_size
-            print(f"Processed {min(offset, total_urls)}/{total_urls} URLs")
-            
-    except sqlite3.Error as e:
-        print(f"SQLite error: {e}")
+        with tqdm(total=total_urls, initial=offset) as pbar:
+            while True:
+                try:
+                    urls = db_manager.get_unprocessed_urls(input_table, url_column, batch_size, offset)
+                    if not urls:
+                        break
+                    
+                    results = await process_urls_async(validator, urls, max_concurrent_requests=30)
+                    db_manager.save_results(results, batch_id=str(offset))
+                    
+                    processed = len(results)
+                    offset += processed
+                    pbar.update(processed)
+                    
+                    # Add small delay between batches
+                    await asyncio.sleep(1)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing batch at offset {offset}: {e}")
+                    await asyncio.sleep(5)  # Wait before retry
+                    continue
+                
+    except KeyboardInterrupt:
+        logger.info("Processing interrupted by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        raise
 
 def main():
     """
@@ -329,33 +508,39 @@ def main():
     parser.add_argument('--url-column', help='Column name containing URLs')
     parser.add_argument('--output-db', help='Output SQLite database path')
     parser.add_argument('--output-table', help='Output table name', default='youtube_channel_info')
-    parser.add_argument('--batch-size', type=int, default=100, help='Batch size for processing')
+    parser.add_argument('--batch-size', type=int, default=800, help='Batch size for processing')
     
     args = parser.parse_args()
 
     if args.input_db and args.input_table and args.url_column and args.output_db and args.output_table:
         # Process database mode
-        process_database(
+        asyncio.run(process_database_async(
             input_db=args.input_db,
             input_table=args.input_table,
             url_column=args.url_column,
             output_db=args.output_db,
             output_table=args.output_table,
             batch_size=args.batch_size
-        )
+        ))
     elif args.url:
         # Single URL mode
         print(f"\nTesting URL: {args.url}")
-        is_valid, result = get_youtube_channel_handle(args.url)
-        if is_valid:
-            print("✓ Valid channel!")
-            print(f"Handle: {result.get('handle', 'Not found')}")
-            print(f"Channel ID: {result.get('channel_id', 'Not found')}")
-            print(f"Subscribers: {result.get('subscribers', 'Not found')}")
-        else:
-            print(f"✗ Invalid: {result}")
+        asyncio.run(process_single_url(args.url))
     else:
         parser.print_help()
+
+async def process_single_url(url: str):
+    """Process a single URL asynchronously"""
+    validator = YouTubeValidator()
+    async with aiohttp.ClientSession() as session:
+        channel_info = await validator.validate_url(session, url)
+        if channel_info.is_valid:
+            print("✓ Valid channel!")
+            print(f"Handle: {channel_info.handle or 'Not found'}")
+            print(f"Channel ID: {channel_info.channel_id or 'Not found'}")
+            print(f"Subscribers: {channel_info.subscribers or 'Not found'}")
+        else:
+            print(f"✗ Invalid: {channel_info.error_message}")
 
 if __name__ == "__main__":
     main()
