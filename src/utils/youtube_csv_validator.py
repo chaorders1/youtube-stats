@@ -102,13 +102,13 @@ class YoutubeCSVValidator:
         self._limit = limit
         self._validator = YouTubeValidator()
         self._df: Optional[pd.DataFrame] = None
-        self._checkpoint_size = 10
+        self._checkpoint_size = 20
         self._rate_settings = {
-            'min_delay': 1.0,     # Minimum 1 second between requests
-            'max_delay': 2.0,     # Maximum 2 seconds between requests
-            'burst_size': 10,     # Reduce burst size to 10 requests
-            'burst_delay': 5.0,   # Increase burst delay to 5 seconds
-            'error_delay': 30.0,  # Increase error delay to 30 seconds
+            'min_delay': 0.02,
+            'max_delay': 0.05,
+            'burst_size': 100,
+            'burst_delay': 0.2,
+            'error_delay': 1.0,
         }
         self._request_times = []
         self._error_count = 0
@@ -284,7 +284,16 @@ class YoutubeCSVValidator:
                         'error': 'Empty URL'
                     }
                 else:
+                    # 添加详细的时间记录
+                    start_time = time.time()
                     validation_result = self._validator.validate_url(url)
+                    end_time = time.time()
+                    request_time = end_time - start_time
+                    
+                    logging.info(f"Request time for {url}: {request_time:.3f}s")
+                    if request_time > 0.5:  # 记录较慢的请求
+                        logging.warning(f"Slow request detected: {request_time:.3f}s for {url}")
+                    
                     self._request_times.append(datetime.now())
                     self._error_count = max(0, self._error_count - 1)
                     
