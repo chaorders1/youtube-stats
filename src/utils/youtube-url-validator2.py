@@ -4,6 +4,13 @@ With a URL argument:
 python youtube-url-validator2.py https://www.youtube.com/@tseries
 python youtube-url-validator2.py https://www.youtube.com/channel/UCaB8suou7DYdKwuaLxuvplQ
 
+python youtube-url-validator2.py \
+    --input-db /Users/yuanlu/Code/youtube-top-10000-channels/data/videoamigo-processed-test.db \
+    --input-table test_unique_youtube_channel_urls \
+    --url-column Youtube_Channel_URL \
+    --output-db /Users/yuanlu/Code/youtube-top-10000-channels/data/videoamigo-processed-test-output.db \
+    --batch-size 100
+
 '''
 
 import requests
@@ -11,6 +18,8 @@ import re
 import time
 from urllib.parse import urlparse
 import argparse
+import sqlite3
+from pathlib import Path
 
 def get_youtube_channel_handle(url: str) -> tuple[bool, dict]:
     """
@@ -98,18 +107,106 @@ def get_youtube_channel_handle(url: str) -> tuple[bool, dict]:
     except Exception as e:
         return False, f"Error: {str(e)}"
 
+def process_database(input_db: str, input_table: str, url_column: str, 
+                    output_db: str, batch_size: int = 100) -> None:
+    """
+    Process URLs from input database and save results to output database.
+    
+    Args:
+        input_db (str): Path to input SQLite database
+        input_table (str): Name of table containing URLs
+        url_column (str): Name of column containing YouTube URLs
+        output_db (str): Path to output SQLite database
+        batch_size (int): Number of URLs to process in each batch
+    """
+    # Connect to input database
+    in_conn = sqlite3.connect(input_db)
+    in_cursor = in_conn.cursor()
+    
+    # Create output database and table
+    out_conn = sqlite3.connect(output_db)
+    out_cursor = out_conn.cursor()
+    out_cursor.execute('''
+        CREATE TABLE IF NOT EXISTS youtube_channel_info (
+            url TEXT PRIMARY KEY,
+            url_status_code INTEGER,
+            url_status TEXT,
+            youtube_channel_id TEXT,
+            youtube_channel_handle TEXT,
+            processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    try:
+        # Get total count of URLs
+        in_cursor.execute(f"SELECT COUNT(*) FROM {input_table}")
+        total_urls = in_cursor.fetchone()[0]
+        print(f"Total URLs to process: {total_urls}")
+        
+        # Process URLs in batches
+        offset = 0
+        while True:
+            in_cursor.execute(f"SELECT {url_column} FROM {input_table} LIMIT {batch_size} OFFSET {offset}")
+            urls = in_cursor.fetchall()
+            if not urls:
+                break
+                
+            for url_row in urls:
+                url = url_row[0]
+                if not url:
+                    continue
+                    
+                print(f"\nProcessing URL: {url}")
+                is_valid, result = get_youtube_channel_handle(url)
+                
+                if is_valid:
+                    out_cursor.execute('''
+                        INSERT OR REPLACE INTO youtube_channel_info 
+                        (url, url_status_code, url_status, youtube_channel_id, youtube_channel_handle)
+                        VALUES (?, 200, 'valid', ?, ?)
+                    ''', (url, result.get('channel_id'), result.get('handle')))
+                else:
+                    out_cursor.execute('''
+                        INSERT OR REPLACE INTO youtube_channel_info 
+                        (url, url_status_code, url_status, youtube_channel_id, youtube_channel_handle)
+                        VALUES (?, 400, ?, NULL, NULL)
+                    ''', (url, str(result)))
+                
+                out_conn.commit()
+                time.sleep(1)  # Rate limiting
+                
+            offset += batch_size
+            print(f"Processed {min(offset, total_urls)}/{total_urls} URLs")
+            
+    finally:
+        in_conn.close()
+        out_conn.close()
+
 def main():
     """
-    Main function to test the YouTube channel handle validator.
-    Can accept a single URL as command line argument.
+    Main function to process YouTube channel URLs from database or command line.
     """
-    # Set up argument parser
     parser = argparse.ArgumentParser(description='Validate YouTube channel URLs')
-    parser.add_argument('url', nargs='?', help='YouTube channel URL to validate')
+    parser.add_argument('--url', help='Single YouTube channel URL to validate')
+    parser.add_argument('--input-db', help='Input SQLite database path')
+    parser.add_argument('--input-table', help='Input table name')
+    parser.add_argument('--url-column', help='Column name containing URLs')
+    parser.add_argument('--output-db', help='Output SQLite database path')
+    parser.add_argument('--batch-size', type=int, default=100, help='Batch size for processing')
+    
     args = parser.parse_args()
 
-    if args.url:
-        # Process single URL from command line
+    if args.input_db and args.input_table and args.url_column and args.output_db:
+        # Process database mode
+        process_database(
+            input_db=args.input_db,
+            input_table=args.input_table,
+            url_column=args.url_column,
+            output_db=args.output_db,
+            batch_size=args.batch_size
+        )
+    elif args.url:
+        # Single URL mode
         print(f"\nTesting URL: {args.url}")
         is_valid, result = get_youtube_channel_handle(args.url)
         if is_valid:
@@ -119,26 +216,7 @@ def main():
         else:
             print(f"✗ Invalid: {result}")
     else:
-        # Fall back to test cases if no URL provided
-        test_urls = [
-            'https://www.youtube.com/@tseries',
-            'https://www.youtube.com/channel/UCX6OQ3DkcsbYNE6H8uQQuVA',
-            'https://www.youtube.com/@invalid_channel_123456789',
-            'https://www.youtube.com/not_a_channel',
-            'https://www.youtube.com/channel/UCaB8suou7DYdKwuaLxuvplQ'
-        ]
-        
-        for url in test_urls:
-            print(f"\nTesting URL: {url}")
-            is_valid, result = get_youtube_channel_handle(url)
-            if is_valid:
-                print("✓ Valid channel!")
-                print(f"Handle: {result.get('handle', 'Not found')}")
-                print(f"Channel ID: {result.get('channel_id', 'Not found')}")
-            else:
-                print(f"✗ Invalid: {result}")
-            # Add a delay between requests to be more considerate of rate limits
-            time.sleep(2)
+        parser.print_help()
 
 if __name__ == "__main__":
     main()
