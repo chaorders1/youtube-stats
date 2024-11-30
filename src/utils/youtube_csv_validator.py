@@ -104,11 +104,11 @@ class YoutubeCSVValidator:
         self._df: Optional[pd.DataFrame] = None
         self._checkpoint_size = 10
         self._rate_settings = {
-            'min_delay': 0.005,
-            'max_delay': 0.02,
-            'burst_size': 20,
-            'burst_delay': 1.0,
-            'error_delay': 10.0,
+            'min_delay': 1.0,     # Minimum 1 second between requests
+            'max_delay': 2.0,     # Maximum 2 seconds between requests
+            'burst_size': 10,     # Reduce burst size to 10 requests
+            'burst_delay': 5.0,   # Increase burst delay to 5 seconds
+            'error_delay': 30.0,  # Increase error delay to 30 seconds
         }
         self._request_times = []
         self._error_count = 0
@@ -301,9 +301,14 @@ class YoutubeCSVValidator:
             except Exception as e:
                 error_message = str(e).lower()
                 if any(term in error_message for term in ['rate limit', '429', 'too many requests']):
-                    self._error_count += 1
-                    self._last_error_time = datetime.now()
-                    logging.warning(f"Rate limit detected. Increasing delays. Error count: {self._error_count}")
+                    # Save the current batch before terminating
+                    if current_batch:
+                        self._save_checkpoint(current_batch, index - len(current_batch) + 1)
+                    logging.error(f"Rate limit detected. Terminating process. Error: {str(e)}")
+                    self._status['status'] = ValidationStatus.FAILED.value
+                    self._status['errors'].append(str(e))
+                    self._update_status([])
+                    sys.exit(1)  # Terminate the program with error code 1
                 
                 logging.error(f"Error validating URL {url}: {str(e)}")
                 result = {
