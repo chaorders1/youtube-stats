@@ -1,7 +1,15 @@
+'''
+
+With a URL argument: 
+python youtube-url-validator2.py https://www.youtube.com/@tseries
+
+'''
+
 import requests
 import re
 import time
 from urllib.parse import urlparse
+import argparse
 
 def get_youtube_channel_handle(url: str) -> tuple[bool, str]:
     """
@@ -69,24 +77,40 @@ def get_youtube_channel_handle(url: str) -> tuple[bool, str]:
 def main():
     """
     Main function to test the YouTube channel handle validator.
+    Can accept a single URL as command line argument.
     """
-    # Test cases
-    test_urls = [
-        'https://www.youtube.com/@tseries',
-        'https://www.youtube.com/channel/UCX6OQ3DkcsbYNE6H8uQQuVA',
-        'https://www.youtube.com/@invalid_channel_123456789',
-        'https://www.youtube.com/not_a_channel',
-    ]
-    
-    for url in test_urls:
-        print(f"\nTesting URL: {url}")
-        is_valid, result = get_youtube_channel_handle(url)
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description='Validate YouTube channel URLs')
+    parser.add_argument('url', nargs='?', help='YouTube channel URL to validate')
+    args = parser.parse_args()
+
+    if args.url:
+        # Process single URL from command line
+        print(f"\nTesting URL: {args.url}")
+        is_valid, result = get_youtube_channel_handle(args.url)
         if is_valid:
             print(f"✓ Valid channel! Handle/ID: {result}")
         else:
             print(f"✗ Invalid: {result}")
-        # Add a delay between requests to be more considerate of rate limits
-        time.sleep(2)
+    else:
+        # Fall back to test cases if no URL provided
+        test_urls = [
+            'https://www.youtube.com/@tseries',
+            'https://www.youtube.com/channel/UCX6OQ3DkcsbYNE6H8uQQuVA',
+            'https://www.youtube.com/@invalid_channel_123456789',
+            'https://www.youtube.com/not_a_channel',
+            'https://www.youtube.com/channel/UCaB8suou7DYdKwuaLxuvplQ'
+        ]
+        
+        for url in test_urls:
+            print(f"\nTesting URL: {url}")
+            is_valid, result = get_youtube_channel_handle(url)
+            if is_valid:
+                print(f"✓ Valid channel! Handle/ID: {result}")
+            else:
+                print(f"✗ Invalid: {result}")
+            # Add a delay between requests to be more considerate of rate limits
+            time.sleep(2)
 
 if __name__ == "__main__":
     main()
