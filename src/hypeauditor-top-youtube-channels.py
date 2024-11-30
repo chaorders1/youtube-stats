@@ -1,3 +1,21 @@
+#!/usr/bin/env python3
+"""
+YouTube Channel Data Scraper
+
+This script scrapes top YouTube channel data from HypeAuditor.com, including:
+- Channel names and display names
+- Subscriber counts
+- Average views, likes, and comments
+- Country information
+
+Usage:
+    python hypeauditor-top-youtube-channels.py [number_of_pages]
+
+Arguments:
+    number_of_pages: Optional. Number of pages to scrape (default: 20)
+"""
+
+import sys
 import time
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -65,7 +83,13 @@ driver = webdriver.Chrome(options=chrome_options)
 
 try:
     all_data = []
-    total_pages = 20
+    total_pages = 20  # default value
+    if len(sys.argv) > 1:
+        try:
+            total_pages = int(sys.argv[1])
+        except ValueError:
+            print("Error: Please provide a valid number of pages")
+            sys.exit(1)
     
     for page in range(1, total_pages + 1):
         print(f"\nScraping page {page} of {total_pages}...")

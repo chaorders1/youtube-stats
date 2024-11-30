@@ -1,3 +1,44 @@
+"""
+VideoAmigo YouTube Channel Scraper
+--------------------------------
+
+This script scrapes YouTube channel data from VideoAmigo rankings pages. It collects information
+such as channel rank, handle, subscriber count, and generates proper YouTube channel URLs.
+
+Features:
+- Scrapes multiple pages of channel rankings
+- Handles both channel IDs and custom handles
+- Exports data to CSV files
+- Supports batch processing of multiple URLs
+- Runs in headless Chrome mode
+
+Usage:
+    python videoamigo-scrape.py <input_csv_file>
+
+Input CSV format:
+    The input CSV file must contain a 'url' column with VideoAmigo ranking URLs.
+    Example:
+    url
+    https://videoamigo.com/rankings/top-youtube-channels
+    https://videoamigo.com/rankings/gaming-channels
+
+Output:
+    Creates CSV files named 'videoamigo-top-youtube-channels-{n}.csv' for each URL processed,
+    containing the following columns:
+    - Rank
+    - Channel_Handle
+    - Channel_ID
+    - Subscribers
+    - YouTube_Channel_URL
+
+Example commands:
+    # Process a single rankings page
+    python videoamigo-scrape.py urls.csv
+
+    # Process multiple rankings pages
+    python videoamigo-scrape.py multiple_rankings.csv
+"""
+
 import time
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service

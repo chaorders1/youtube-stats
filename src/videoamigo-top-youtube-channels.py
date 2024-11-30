@@ -1,3 +1,29 @@
+#!/usr/bin/env python3
+"""
+YouTube Channel Scraper for VideoAmigo
+
+This script scrapes top YouTube channel data from VideoAmigo's website.
+It collects information such as channel rank, handle, subscriber count,
+and generates proper YouTube URLs for each channel.
+
+Usage:
+    python videoamigo-top-youtube-channels.py [--limit LIMIT] [--headless]
+
+Arguments:
+    --limit LIMIT    Maximum number of channels to scrape (default: 10000)
+    --headless      Run Chrome in headless mode (default: True)
+
+Output:
+    Creates a CSV file 'videoamigo-top-youtube-channels.csv' with the scraped data.
+
+Requirements:
+    - Python 3.6+
+    - selenium
+    - pandas
+    - Chrome/Chromium browser
+"""
+
+import argparse
 import time
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -63,6 +89,12 @@ def scrape_page(driver, offset):
         print(f"Error scraping page with offset {offset}: {str(e)}")
         return []
 
+# Set up command line arguments
+parser = argparse.ArgumentParser(description='Scrape top YouTube channels from VideoAmigo')
+parser.add_argument('--limit', type=int, default=10000, help='Maximum number of channels to scrape')
+parser.add_argument('--headless', action='store_true', default=True, help='Run Chrome in headless mode')
+args = parser.parse_args()
+
 print("Setting up Chrome options...")
 chrome_options = Options()
 chrome_options.add_argument('--headless')  # Run in headless mode
@@ -78,7 +110,7 @@ driver = webdriver.Chrome(options=chrome_options)
 try:
     all_data = []
     # Scrape from 0 to 10000 with steps of 500
-    for offset in range(0, 10000, 500):
+    for offset in range(0, args.limit, 500):
         print(f"\nScraping page with offset {offset}...")
         url = f'https://stats.videoamigo.com/top-youtube-channels-new/o-overall/subs/{offset}/desc'
         driver.get(url)
