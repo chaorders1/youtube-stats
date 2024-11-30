@@ -1,9 +1,11 @@
 {
-  "status": "pending",
+  "status": "failed",
   "last_processed_index": 0,
-  "last_update": "2024-11-30T02:08:02.015549",
-  "total_processed": 78,
-  "total_valid": 78,
-  "total_invalid": 0,
-  "errors": []
+  "last_update": "2024-11-30T02:26:14.892253",
+  "total_processed": 1078,
+  "total_valid": 1018,
+  "total_invalid": 60,
+  "errors": [
+    "Bool column has NA values in column 2"
+  ]
 }

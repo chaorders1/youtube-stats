@@ -104,11 +104,11 @@ class YoutubeCSVValidator:
         self._df: Optional[pd.DataFrame] = None
         self._checkpoint_size = 10
         self._rate_settings = {
-            'min_delay': 0.2,
-            'max_delay': 2.0,
-            'burst_size': 5,
-            'burst_delay': 5.0,
-            'error_delay': 30.0,
+            'min_delay': 0.005,
+            'max_delay': 0.02,
+            'burst_size': 20,
+            'burst_delay': 1.0,
+            'error_delay': 10.0,
         }
         self._request_times = []
         self._error_count = 0
