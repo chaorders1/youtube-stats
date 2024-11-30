@@ -137,7 +137,7 @@ class YoutubeCSVValidator:
             if self._url_column not in self._df.columns:
                 raise ValueError(f"Column '{self._url_column}' not found in CSV file")
             
-            # Initialize new columns if they don't exist
+            # Initialize new columns if they don't exist, preserving existing data
             new_columns = {
                 'validated_url': '',
                 'is_valid': pd.NA,
@@ -149,11 +149,12 @@ class YoutubeCSVValidator:
             
             for col, default_value in new_columns.items():
                 if col not in self._df.columns:
+                    # Only add new column with default value if it doesn't exist
                     self._df[col] = default_value
             
-            # Apply limit if specified
+            # Apply limit if specified, but only for processing
             if self._limit is not None:
-                self._df = self._df.iloc[:self._limit]
+                self._df = self._df.iloc[:self._limit].copy()
             
             logging.info(f"Successfully loaded CSV file: {self._input_file} ({len(self._df)} rows)")
         
@@ -162,29 +163,41 @@ class YoutubeCSVValidator:
             raise
 
     def _save_checkpoint(self, results: list, start_idx: int) -> None:
-        """Update the input CSV file with new results."""
+        """Update the input CSV file with new results while preserving original data."""
         max_retries = 3
         retry_count = 0
         
+        validation_columns = [
+            'validated_url', 'is_valid', 'channel_id',
+            'handle', 'subscribers', 'error'
+        ]
+        
         while retry_count < max_retries:
             try:
-                # Create backup of existing file
-                backup_file = self._input_file.parent / f"{self._input_file.stem}_backup.csv"
-                self._df.to_csv(backup_file, index=False)
+                # Read the current state of the file
+                current_df = pd.read_csv(self._input_file)
                 
-                # Update the DataFrame with new results
+                # Create backup of current file
+                backup_file = self._input_file.parent / f"{self._input_file.stem}_backup.csv"
+                current_df.to_csv(backup_file, index=False)
+                
+                # Ensure validation columns exist
+                for col in validation_columns:
+                    if col not in current_df.columns:
+                        current_df[col] = pd.NA if col in ['is_valid', 'subscribers'] else ''
+                
+                # Update only the new validation columns for processed URLs
                 for result in results:
                     url = result[self._url_column]
-                    # Find the row index for this URL
-                    idx = self._df[self._df[self._url_column] == url].index
+                    idx = current_df[current_df[self._url_column] == url].index
                     if len(idx) > 0:
-                        # Update all columns except the URL column
-                        for key, value in result.items():
-                            if key != self._url_column:
-                                self._df.loc[idx[0], key] = value
+                        # Only update the validation columns, preserve all other data
+                        for col in validation_columns:
+                            if col in result:
+                                current_df.loc[idx[0], col] = result[col]
                 
                 # Save the updated DataFrame back to the original file
-                self._df.to_csv(self._input_file, index=False)
+                current_df.to_csv(self._input_file, index=False)
                 
                 logging.info(f"Saved checkpoint at index {start_idx + len(results)}")
                 self._update_status(results)
