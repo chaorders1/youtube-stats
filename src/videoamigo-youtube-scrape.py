@@ -13,7 +13,7 @@ Features:
 - Runs in headless Chrome mode
 
 Usage:
-    python videoamigo-scrape.py <input_csv_file>
+    python videoamigo-youtube-scrape.py <input_csv_file>
 
 Input CSV format:
     The input CSV file must contain a 'url' column with VideoAmigo ranking URLs.
@@ -33,10 +33,10 @@ Output:
 
 Example commands:
     # Process a single rankings page
-    python videoamigo-scrape.py urls.csv
+    python videoamigo-youtube-scrape.py urls.csv
 
     # Process multiple rankings pages
-    python videoamigo-scrape.py multiple_rankings.csv
+    python videoamigo-youtube-scrape.py multiple_rankings.csv
 """
 
 import time

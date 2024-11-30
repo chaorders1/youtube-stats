@@ -9,7 +9,7 @@ This script scrapes top YouTube channel data from HypeAuditor.com, including:
 - Country information
 
 Usage:
-    python hypeauditor-top-youtube-channels.py [number_of_pages]
+    python hypeauditor-youtube-scrape.py [number_of_pages]
 
 Arguments:
     number_of_pages: Optional. Number of pages to scrape (default: 20)
