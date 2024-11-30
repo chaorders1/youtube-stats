@@ -2,6 +2,7 @@
 
 With a URL argument: 
 python youtube-url-validator2.py https://www.youtube.com/@tseries
+python youtube-url-validator2.py https://www.youtube.com/channel/UCaB8suou7DYdKwuaLxuvplQ
 
 '''
 
@@ -11,17 +12,17 @@ import time
 from urllib.parse import urlparse
 import argparse
 
-def get_youtube_channel_handle(url: str) -> tuple[bool, str]:
+def get_youtube_channel_handle(url: str) -> tuple[bool, dict]:
     """
-    Validate a YouTube channel URL and extract the channel handle.
+    Validate a YouTube channel URL and extract channel information from HTML.
     
     Args:
         url (str): The YouTube channel URL to validate
         
     Returns:
-        tuple[bool, str]: A tuple containing:
+        tuple[bool, dict]: A tuple containing:
             - bool: True if valid, False if invalid
-            - str: Channel handle/ID if valid, error message if invalid
+            - dict: Channel info if valid (handle, channel_id), error message if invalid
     """
     # Clean and validate the URL
     try:
@@ -32,23 +33,6 @@ def get_youtube_channel_handle(url: str) -> tuple[bool, str]:
         # Ensure it's a YouTube URL
         if not any(domain in url.lower() for domain in ['youtube.com', 'youtu.be']):
             return False, "Not a YouTube URL"
-        
-        # Define patterns for different YouTube channel URL formats
-        patterns = {
-            'handle': r'youtube\.com/@([a-zA-Z0-9_-]+)',
-            'channel_id': r'youtube\.com/channel/([a-zA-Z0-9_-]+)'
-        }
-        
-        # Try to match the URL against our patterns
-        channel_identifier = None
-        for pattern_type, pattern in patterns.items():
-            match = re.search(pattern, url)
-            if match:
-                channel_identifier = match.group(1)
-                break
-        
-        if not channel_identifier:
-            return False, "Invalid YouTube channel URL format"
         
         # Browser-like headers to potentially reduce rate limiting
         headers = {
@@ -61,7 +45,47 @@ def get_youtube_channel_handle(url: str) -> tuple[bool, str]:
         response = requests.get(url, headers=headers, allow_redirects=True, timeout=10)
         
         if response.status_code == 200:
-            return True, channel_identifier
+            # Try multiple patterns to extract channel info
+            channel_info = {}
+            
+            # Pattern for channel ID (expanded patterns)
+            channel_id_patterns = [
+                r'"channelId":"([^"]+)"',
+                r'"externalChannelId":"([^"]+)"',
+                r'"ucid":"([^"]+)"',
+                r'channel/([^/"]+)',
+            ]
+            
+            # Pattern for handle (expanded patterns)
+            handle_patterns = [
+                r'"channelHandle":"(@[^"]+)"',
+                r'"vanityChannelUrl":"http://www.youtube.com/(@[^"]+)"',
+                r'youtube\.com/(@[^"\s/]+)',
+            ]
+            
+            # Try all channel ID patterns
+            for pattern in channel_id_patterns:
+                channel_id_match = re.search(pattern, response.text)
+                if channel_id_match:
+                    channel_info['channel_id'] = channel_id_match.group(1)
+                    break
+            
+            # Try all handle patterns
+            for pattern in handle_patterns:
+                handle_match = re.search(pattern, response.text)
+                if handle_match:
+                    channel_info['handle'] = handle_match.group(1)
+                    break
+            
+            # If we at least have a channel ID, consider it valid
+            if 'channel_id' in channel_info:
+                return True, channel_info
+            
+            # For debugging (optional)
+            # print("Debug - HTML snippet:", response.text[:1000])
+            
+            return False, "Could not extract channel information from page"
+            
         elif response.status_code == 404:
             return False, "Channel not found"
         elif response.status_code == 429:
@@ -89,7 +113,9 @@ def main():
         print(f"\nTesting URL: {args.url}")
         is_valid, result = get_youtube_channel_handle(args.url)
         if is_valid:
-            print(f"✓ Valid channel! Handle/ID: {result}")
+            print("✓ Valid channel!")
+            print(f"Handle: {result.get('handle', 'Not found')}")
+            print(f"Channel ID: {result.get('channel_id', 'Not found')}")
         else:
             print(f"✗ Invalid: {result}")
     else:
@@ -106,7 +132,9 @@ def main():
             print(f"\nTesting URL: {url}")
             is_valid, result = get_youtube_channel_handle(url)
             if is_valid:
-                print(f"✓ Valid channel! Handle/ID: {result}")
+                print("✓ Valid channel!")
+                print(f"Handle: {result.get('handle', 'Not found')}")
+                print(f"Channel ID: {result.get('channel_id', 'Not found')}")
             else:
                 print(f"✗ Invalid: {result}")
             # Add a delay between requests to be more considerate of rate limits
