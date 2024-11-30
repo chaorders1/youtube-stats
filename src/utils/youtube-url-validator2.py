@@ -259,8 +259,20 @@ class DatabaseManager:
             ])
             conn.commit()
 
+    def get_total_urls(self, table: str) -> int:
+        """Get total number of URLs in the input table"""
+        with self._get_input_connection() as conn:
+            cursor = conn.execute(f"SELECT COUNT(*) FROM {table}")
+            return cursor.fetchone()[0]
+
+    def get_last_processed_offset(self, table: str) -> int:
+        """Get the last processed offset from the output table"""
+        with self._get_output_connection() as conn:
+            cursor = conn.execute(f"SELECT COUNT(*) FROM {table}")
+            return cursor.fetchone()[0]
+
 def process_urls_parallel(validator: YouTubeValidator, urls: List[str], 
-                         max_workers: int = 10) -> List[ChannelInfo]:
+                         max_workers: int = 30) -> List[ChannelInfo]:
     """Process URLs in parallel using ThreadPoolExecutor"""
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -269,92 +281,38 @@ def process_urls_parallel(validator: YouTubeValidator, urls: List[str],
         
         for future in tqdm(as_completed(future_to_url), total=len(urls)):
             results.append(future.result())
+            time.sleep(0.1)  # Reduced sleep time for faster processing
     return results
 
 def process_database(input_db: str, input_table: str, url_column: str, 
-                    output_db: str, output_table: str, batch_size: int = 100) -> None:
+                    output_db: str, output_table: str, batch_size: int = 800) -> None:
     """
     Process URLs from input database and save results to output database.
-    
-    Args:
-        input_db (str): Path to input SQLite database
-        input_table (str): Name of table containing URLs
-        url_column (str): Name of column containing YouTube URLs
-        output_db (str): Path to output SQLite database
-        output_table (str): Name of table to store results
-        batch_size (int): Number of URLs to process in each batch
     """
-    # Connect to input database
-    in_conn = sqlite3.connect(input_db)
-    in_cursor = in_conn.cursor()
-    
-    # Connect to output database
-    out_conn = sqlite3.connect(output_db)
-    out_cursor = out_conn.cursor()
-    
-    validator = YouTubeValidator()  # Create an instance of YouTubeValidator
+    validator = YouTubeValidator()
+    db_manager = DatabaseManager(input_db, output_db)
     
     try:
-        # Ensure the table is created
-        out_cursor.execute(f'''
-            CREATE TABLE IF NOT EXISTS {output_table} (
-                url TEXT PRIMARY KEY,
-                url_status_code INTEGER,
-                url_status TEXT,
-                youtube_channel_id TEXT,
-                youtube_channel_handle TEXT,
-                subscriber_count TEXT,
-                processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        out_conn.commit()  # Ensure the table creation is committed
-        print(f"Table '{output_table}' ensured in the output database.")
-        
-        # Get total count of URLs
-        in_cursor.execute(f"SELECT COUNT(*) FROM {input_table}")
-        total_urls = in_cursor.fetchone()[0]
+        total_urls = db_manager.get_total_urls(input_table)
         print(f"Total URLs to process: {total_urls}")
         
-        # Process URLs in batches
-        offset = 0
+        offset = db_manager.get_last_processed_offset(output_table)
+        print(f"Resuming from offset: {offset}")
+        
         while True:
-            in_cursor.execute(f"SELECT {url_column} FROM {input_table} LIMIT {batch_size} OFFSET {offset}")
-            urls = in_cursor.fetchall()
+            urls = db_manager.get_unprocessed_urls(input_table, url_column, batch_size, offset)
             if not urls:
                 break
-                
-            for url_row in urls:
-                url = url_row[0]
-                if not url:
-                    continue
-                    
-                print(f"\nProcessing URL: {url}")
-                channel_info = validator.validate_url(url)  # Use validate_url method
-                
-                if channel_info.is_valid:
-                    out_cursor.execute(f'''
-                        INSERT OR REPLACE INTO {output_table} 
-                        (url, url_status_code, url_status, youtube_channel_id, youtube_channel_handle, subscriber_count)
-                        VALUES (?, 200, 'valid', ?, ?, ?)
-                    ''', (url, channel_info.channel_id, channel_info.handle, channel_info.subscribers))
-                else:
-                    out_cursor.execute(f'''
-                        INSERT OR REPLACE INTO {output_table} 
-                        (url, url_status_code, url_status, youtube_channel_id, youtube_channel_handle, subscriber_count)
-                        VALUES (?, 400, ?, NULL, NULL, NULL)
-                    ''', (url, channel_info.error_message))
-                
-                out_conn.commit()
-                time.sleep(1)  # Rate limiting
-                
+            
+            print(f"Processing batch starting at offset {offset}")
+            results = process_urls_parallel(validator, urls, max_workers=30)
+            db_manager.save_results(results, batch_id=str(offset))
+            
             offset += batch_size
             print(f"Processed {min(offset, total_urls)}/{total_urls} URLs")
             
     except sqlite3.Error as e:
         print(f"SQLite error: {e}")
-    finally:
-        in_conn.close()
-        out_conn.close()
 
 def main():
     """
