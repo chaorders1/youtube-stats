@@ -105,7 +105,7 @@ class YoutubeCSVValidator:
         self._checkpoint_size = 10
         self._rate_settings = {
             'min_delay': 0.1,
-            'max_delay': 0.2,
+            'max_delay': 1,
             'burst_size': 20,
             'burst_delay': 0.2,
             'error_delay': 1.0,
