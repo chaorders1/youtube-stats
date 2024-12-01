@@ -1,9 +1,9 @@
 {
   "status": "pending",
   "last_processed_index": 0,
-  "last_update": "2024-11-30T19:30:49.573774",
-  "total_processed": 16870,
-  "total_valid": 16841,
-  "total_invalid": 29,
+  "last_update": "2024-12-01T01:35:13.209376",
+  "total_processed": 44826,
+  "total_valid": 44424,
+  "total_invalid": 402,
   "errors": []
 }
