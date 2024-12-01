@@ -135,7 +135,6 @@ profile_default/
 ipython_config.py
 
 # Project Specific
-top_youtube_channels_*.csv
 
 # Database Files
 *.db
