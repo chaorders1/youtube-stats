@@ -6,7 +6,7 @@ Command line arguments:
 Example:
     # Validate YouTube channel URLs from a CSV file
     python youtube_csv_validator.py --input_file "youtube_channel_urls.csv" --url_column "Youtube_Channel_URL" --limit 100
-    python youtube_csv_validator.py --input_file "/Users/yuanlu/Code/youtube-top-10000-channels/src/utils/youtube_channel_urls_web.csv" --url_column "Youtube_Channel_URL"
+    python youtube_csv_validator.py --input_file "/Users/yuanlu/Code/youtube-top-10000-channels/src/utils/youtube_channel_urls_web.csv" --url_column "Youtube_Channel_URL" --limit 100
 '''
 
 import pandas as pd
