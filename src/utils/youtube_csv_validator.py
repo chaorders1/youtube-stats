@@ -105,7 +105,7 @@ class YoutubeCSVValidator:
         self._checkpoint_size = 10
         self._rate_settings = {
             'min_delay': 0.1,
-            'max_delay': 0.5,
+            'max_delay': 0.2,
             'burst_size': 20,
             'burst_delay': 0.2,
             'error_delay': 1.0,
@@ -291,7 +291,7 @@ class YoutubeCSVValidator:
                     request_time = end_time - start_time
                     
                     logging.info(f"Request time for {url}: {request_time:.3f}s")
-                    if request_time > 0.5:  # 记录较慢的请求
+                    if request_time > 1.0:  # 记录较慢的请求
                         logging.warning(f"Slow request detected: {request_time:.3f}s for {url}")
                     
                     self._request_times.append(datetime.now())
