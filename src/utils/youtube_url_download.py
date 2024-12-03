@@ -17,7 +17,7 @@ python youtube_url_download.py --url urls.csv --from-csv
 python youtube_url_download.py --url path/to/urls.csv --from-csv
 
 # Download from a specific column in CSV file
-python youtube_url_download.py --url /Users/yuanlu/Code/youtube-top-10000-channels/data/split_0.csv --from-csv --column validated_url --output-dir /Users/yuanlu/Code/youtube-top-10000-channels/data/split_0/
+python youtube_url_download.py --url /Users/yuanlu/Code/youtube-top-10000-channels/data/split_0.csv --from-csv --column validated_url --output-dir /Users/yuanlu/Code/youtube-top-10000-channels/data/split_0
 
 # Specify custom output directory
 python youtube_url_download.py --url https://www.youtube.com/@lidangzzz/videos --output-dir /Users/yuanlu/Code/youtube-top-10000-channels/data/source_code
@@ -113,8 +113,8 @@ def main():
     parser.add_argument('--output-dir', type=str, default='@data', help='Output directory (default: @data)')
     parser.add_argument('--from-csv', action='store_true', help='Treat input as CSV file containing URLs')
     parser.add_argument('--column', type=str, help='Specify the column name in CSV file containing URLs')
-    parser.add_argument('--min-delay', type=float, default=0.1, help='Minimum delay between requests in seconds')
-    parser.add_argument('--max-delay', type=float, default=0.3, help='Maximum delay between requests in seconds')
+    parser.add_argument('--min-delay', type=float, default=1, help='Minimum delay between requests in seconds')
+    parser.add_argument('--max-delay', type=float, default=3, help='Maximum delay between requests in seconds')
     
     args = parser.parse_args()
     
