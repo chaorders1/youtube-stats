@@ -17,7 +17,7 @@ python youtube_url_download_async.py --url urls.csv --from-csv --min-delay 0.1 -
 python youtube_url_download_async.py --url path/to/urls.csv --from-csv
 
 # Download from a specific column in CSV file
-python youtube_url_download_async.py --url /Users/yuanlu/Desktop/youtube_channel_video_10000.csv --from-csv --column validated_url --output-dir /Users/yuanlu/Desktop/fetch_test
+python youtube_url_download_async.py --url /Users/yuanlu/Desktop/video_id.csv --from-csv --column video_id_url --output-dir /Users/yuanlu/Desktop/fetch_test
 
 # Specify custom output directory
 python youtube_url_download_async.py --url https://www.youtube.com/@lidangzzz/videos --output-dir data/source_code
@@ -39,23 +39,12 @@ from aiohttp_retry import RetryClient, ExponentialRetry
 from asyncio import Semaphore
 from tqdm import tqdm
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('youtube_download.log')
-    ]
-)
-logger = logging.getLogger(__name__)
-
 class AsyncYouTubeDownloader:
     def __init__(self, 
                  concurrency: int = 25,
                  min_delay: float = 0.1,
                  max_delay: float = 0.4,
-                 output_dir: str = "@data",
+                 output_dir: str = "output_dir",
                  timeout: int = 30):
         self.concurrency = concurrency
         self.min_delay = min_delay
@@ -68,6 +57,27 @@ class AsyncYouTubeDownloader:
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
         
+        # Configure logging to write to output directory
+        log_file = os.path.join(output_dir, "youtube_download.log")
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.INFO)
+        
+        # Remove any existing handlers to avoid duplicate logging
+        self.logger.handlers = []
+        
+        # Add handlers
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        
+        # Console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        self.logger.addHandler(console_handler)
+        
+        # File handler
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(formatter)
+        self.logger.addHandler(file_handler)
+        
         # Put checkpoint file in output directory
         self.checkpoint_file = os.path.join(output_dir, "download_checkpoint.txt")
         self.completed_urls = self._load_checkpoint()
@@ -79,9 +89,9 @@ class AsyncYouTubeDownloader:
             try:
                 with open(self.checkpoint_file, 'r') as f:
                     completed = set(line.strip() for line in f if line.strip())
-                logger.info(f"Loaded {len(completed)} completed URLs from checkpoint")
+                self.logger.info(f"Loaded {len(completed)} completed URLs from checkpoint")
             except Exception as e:
-                logger.error(f"Error loading checkpoint: {e}")
+                self.logger.error(f"Error loading checkpoint: {e}")
         return completed
         
     def _save_checkpoint(self, url: str):
@@ -92,7 +102,7 @@ class AsyncYouTubeDownloader:
                 f.flush()  # Force write to disk
                 os.fsync(f.fileno())  # Ensure it's written to disk
         except Exception as e:
-            logger.error(f"Error saving checkpoint: {e}")
+            self.logger.error(f"Error saving checkpoint: {e}")
             
     async def download_html(self, url: str, session: RetryClient) -> Optional[str]:
         """
@@ -134,7 +144,7 @@ class AsyncYouTubeDownloader:
                 async with session.get(url, headers=headers) as response:
                     if response.status == 429:  # Too Many Requests
                         retry_after = int(response.headers.get('Retry-After', 60))
-                        logger.warning(f"Rate limited on {domain}. Waiting {retry_after}s...")
+                        self.logger.warning(f"Rate limited on {domain}. Waiting {retry_after}s...")
                         await asyncio.sleep(retry_after)
                         return None
                         
@@ -142,7 +152,7 @@ class AsyncYouTubeDownloader:
                     return await response.text()
                     
         except Exception as e:
-            logger.error(f"Error downloading {url}: {str(e)}")
+            self.logger.error(f"Error downloading {url}: {str(e)}")
             return None
             
     def save_html(self, html_content: str, url: str) -> str:
@@ -208,7 +218,7 @@ class AsyncYouTubeDownloader:
                         await asyncio.sleep(random.uniform(self.min_delay, self.max_delay))
                         
                     except Exception as e:
-                        logger.error(f"Error processing {url}: {e}")
+                        self.logger.error(f"Error processing {url}: {e}")
                         domain_results.append((url, False))
                         pbar.update(1)
                 
@@ -224,11 +234,11 @@ class AsyncYouTubeDownloader:
                 html_content = await self.download_html(url, session)
                 if html_content:
                     filepath = self.save_html(html_content, url)
-                    logger.debug(f"Saved {url} to {filepath}")
+                    self.logger.debug(f"Saved {url} to {filepath}")
                     return True
                 return False
             except Exception as e:
-                logger.error(f"Failed to process {url}: {e}")
+                self.logger.error(f"Failed to process {url}: {e}")
                 return False
 
     async def download_html(self, url: str, session: RetryClient) -> Optional[str]:
@@ -248,15 +258,15 @@ class AsyncYouTubeDownloader:
                     return await response.text()
                 elif response.status == 429:
                     wait_time = int(response.headers.get('Retry-After', 60))
-                    logger.warning(f"Rate limited on {domain}. Waiting {wait_time}s...")
+                    self.logger.warning(f"Rate limited on {domain}. Waiting {wait_time}s...")
                     await asyncio.sleep(wait_time)
                     return await self.download_html(url, session)
                 else:
-                    logger.warning(f"Unexpected status {response.status} for {url}")
+                    self.logger.warning(f"Unexpected status {response.status} for {url}")
                     return None
                     
         except Exception as e:
-            logger.error(f"Download error for {url}: {e}")
+            self.logger.error(f"Download error for {url}: {e}")
             return None
 
     def _group_urls_by_domain(self, urls: List[str]) -> Dict[str, List[str]]:
@@ -308,7 +318,7 @@ async def download_all_channels(urls):
 async def main():
     parser = argparse.ArgumentParser(description='Download HTML from YouTube URLs asynchronously')
     parser.add_argument('--url', type=str, required=True, help='URL or path to CSV file containing URLs')
-    parser.add_argument('--output-dir', type=str, default='@data', help='Output directory')
+    parser.add_argument('--output-dir', type=str, default='output_dir', help='Output directory')
     parser.add_argument('--from-csv', action='store_true', help='Treat input as CSV file containing URLs')
     parser.add_argument('--column', type=str, help='Column name in CSV containing URLs')
     parser.add_argument('--min-delay', type=float, default=0.1, help='Minimum delay between requests to same domain')
@@ -336,15 +346,15 @@ async def main():
                 url_column = args.column
             else:
                 url_column = 'url' if 'url' in df.columns else df.columns[0]
-                logger.info(f"Using column: {url_column}")
+                logging.info(f"Using column: {url_column}")
                 
             urls = df[url_column].tolist()
-            logger.info(f"Found {len(urls)} URLs to download")
+            logging.info(f"Found {len(urls)} URLs to download")
             
             await downloader.process_urls(urls)
             
         except Exception as e:
-            logger.error(f"Error processing CSV: {str(e)}")
+            logging.error(f"Error processing CSV: {str(e)}")
             return
             
     else:
