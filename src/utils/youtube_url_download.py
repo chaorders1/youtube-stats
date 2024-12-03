@@ -114,7 +114,7 @@ def main():
     parser.add_argument('--from-csv', action='store_true', help='Treat input as CSV file containing URLs')
     parser.add_argument('--column', type=str, help='Specify the column name in CSV file containing URLs')
     parser.add_argument('--min-delay', type=float, default=0.1, help='Minimum delay between requests in seconds')
-    parser.add_argument('--max-delay', type=float, default=0.3, help='Maximum delay between requests in seconds')
+    parser.add_argument('--max-delay', type=float, default=0.2, help='Maximum delay between requests in seconds')
     
     args = parser.parse_args()
     
