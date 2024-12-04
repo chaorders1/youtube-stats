@@ -25,7 +25,7 @@ Examples:
     
     # Using all options
     python youtube_parser_video_folder.py ./youtube_pages ./parsed_results --workers 8
-    python youtube_parser_video_folder.py /Users/yuanlu/Desktop/youtube_video_raw_copy /Users/yuanlu/Desktop/output --workers 8
+    python youtube_parser_video_folder.py /Users/yuanlu/Desktop/fetch /Users/yuanlu/Desktop/output --workers 8
 '''
 
 import os

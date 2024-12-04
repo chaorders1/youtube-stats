@@ -1,4 +1,5 @@
 '''
+Alarm: it can only parse a youtube channel page. We need develop a new function for youtube video page
 YouTube Page Parser
 
 Extracts video metadata from a saved YouTube page using BeautifulSoup4.
@@ -16,7 +17,7 @@ Usage:
     python youtube_parser_video.py <html_file> [output_csv_file]
 
 Example:
-    python youtube_parser_video.py /Users/yuanlu/Desktop/youtube_video_raw/https_www_youtube_com_channel_UCZZHPXsg6LopvdOKF7qM6cQ_videos_20241202_133249.html my_videos.csv
+    python youtube_parser_video.py /Users/yuanlu/Desktop/youtube_video_raw/https_www_youtube_com_@1aauto_videos_20241202_112448.html my_videos.csv
 '''
 
 import csv
