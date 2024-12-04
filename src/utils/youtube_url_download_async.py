@@ -38,12 +38,13 @@ from aiohttp import ClientTimeout
 from aiohttp_retry import RetryClient, ExponentialRetry
 from asyncio import Semaphore
 from tqdm import tqdm
+from collections import defaultdict
 
 class AsyncYouTubeDownloader:
     def __init__(self, 
                  concurrency: int = 25,
-                 min_delay: float = 0.1,
-                 max_delay: float = 0.4,
+                 min_delay: float = 0.02,
+                 max_delay: float = 0.05,
                  output_dir: str = "output_dir",
                  timeout: int = 30):
         self.concurrency = concurrency
@@ -52,7 +53,14 @@ class AsyncYouTubeDownloader:
         self.output_dir = output_dir
         self.timeout = timeout
         self.semaphore = asyncio.Semaphore(concurrency)
-        self.last_request_time: Dict[str, float] = {}
+        
+        # Separate rate limiting by domain/endpoint
+        self.last_request_time = defaultdict(lambda: defaultdict(float))
+        
+        # Track request success/failure rates
+        self.success_count = 0
+        self.failure_count = 0
+        self.adaptive_delay = min_delay
         
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
@@ -278,6 +286,42 @@ class AsyncYouTubeDownloader:
                 domain_urls[domain] = []
             domain_urls[domain].append(url)
         return domain_urls
+
+    async def get_delay(self, domain: str) -> float:
+        """Dynamically adjust delay based on success/failure rates"""
+        total_requests = self.success_count + self.failure_count
+        if total_requests > 100:  # Only adapt after sufficient samples
+            failure_rate = self.failure_count / total_requests
+            if failure_rate > 0.1:  # If more than 10% failures
+                self.adaptive_delay = min(self.adaptive_delay * 1.5, self.max_delay)
+            elif failure_rate < 0.05:  # If less than 5% failures
+                self.adaptive_delay = max(self.adaptive_delay * 0.8, self.min_delay)
+        
+        current_time = time.time()
+        last_time = self.last_request_time[domain]['time']
+        elapsed = current_time - last_time
+        
+        if elapsed < self.adaptive_delay:
+            return self.adaptive_delay - elapsed
+        return 0
+
+    async def make_request(self, url: str, *args, **kwargs):
+        domain = urlparse(url).netloc
+        
+        async with self.semaphore:
+            delay = await self.get_delay(domain)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            
+            try:
+                # Make the actual request here
+                result = await your_request_function(url, *args, **kwargs)
+                self.success_count += 1
+                self.last_request_time[domain]['time'] = time.time()
+                return result
+            except Exception as e:
+                self.failure_count += 1
+                raise e
 
 async def download_channel_info(session, url, semaphore):
     """Download info for a single channel with rate limiting"""
